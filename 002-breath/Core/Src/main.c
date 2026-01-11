@@ -33,7 +33,7 @@
 /* USER CODE BEGIN PD */
 #define PWM_PERIOD     100     // PWM resolution (0..100)
 #define PWM_DELAY_US   10      // PWM frequency base (10 us -> ~1 kHz PWM, no flicker)
-#define FADE_DELAY_MS  20      // Delay between brightness steps (controls breathing speed)
+#define FADE_DELAY_MS  50      // Delay between brightness steps (controls breathing speed)
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -99,40 +99,52 @@ int main(void)
   /* USER CODE BEGIN WHILE */
   while (1)
   {
-	  // Fade in: gradually increase brightness from 0% to 100%
-	  for (int duty = 0; duty <= PWM_PERIOD; duty++)
-	  {
-	      // Generate PWM signal for current duty cycle
-	      for (int i = 0; i < PWM_PERIOD; i++)
-	      {
-	          if (i < duty)
-	              HAL_GPIO_WritePin(GPIOC, GPIO_PIN_13, GPIO_PIN_RESET); // LED on (inverted logic)
-	          else
-	              HAL_GPIO_WritePin(GPIOC, GPIO_PIN_13, GPIO_PIN_SET);   // LED off
+    /* USER CODE END WHILE */
 
-	          delay_us(PWM_DELAY_US); // Delay to set PWM frequency (~1 kHz)
-	      }
-	      HAL_Delay(FADE_DELAY_MS); // Delay between brightness steps (breathing speed)
-	  }
+    /* USER CODE BEGIN 3 */
 
-	  // Fade out: gradually decrease brightness from 100% to 0%
-	  for (int duty = PWM_PERIOD; duty >= 0; duty--)
-	  {
-	      // Generate PWM signal for current duty cycle
-	      for (int i = 0; i < PWM_PERIOD; i++)
-	      {
-	          if (i < duty)
-	              HAL_GPIO_WritePin(GPIOC, GPIO_PIN_13, GPIO_PIN_RESET); // LED on (inverted logic)
-	          else
-	              HAL_GPIO_WritePin(GPIOC, GPIO_PIN_13, GPIO_PIN_SET);   // LED off
+    /* continuous software pwm frame + non-blocking fade control */
+    static uint32_t lastFade = 0;
+    static int duty = 0;
+    static int dir = 1;
 
-	          delay_us(PWM_DELAY_US); // Delay to set PWM frequency (~1 kHz)
-	      }
-	      HAL_Delay(FADE_DELAY_MS); // Delay between brightness steps (breathing speed)
-	  }
-      /* USER CODE END WHILE */
+    /* generate one pwm frame at the current duty */
+    for (int i = 0; i < PWM_PERIOD; i++)
+    {
+      if (i < duty)
+        HAL_GPIO_WritePin(GPIOC, GPIO_PIN_13, GPIO_PIN_RESET); /* led on (inverted) */
+      else
+        HAL_GPIO_WritePin(GPIOC, GPIO_PIN_13, GPIO_PIN_SET);   /* led off */
 
-      /* USER CODE BEGIN 3 */
+      delay_us(PWM_DELAY_US);
+    }
+
+    /* initialize lastFade on first run */
+    if (lastFade == 0)
+    {
+      lastFade = HAL_GetTick();
+    }
+
+    /* update duty only after fade delay elapsed (keeps pwm running continuously) */
+    uint32_t now = HAL_GetTick();
+    if ((now - lastFade) >= FADE_DELAY_MS)
+    {
+      lastFade = now;
+
+      duty += dir;
+      if (duty >= PWM_PERIOD)
+      {
+        duty = PWM_PERIOD;
+        dir = -1;
+      }
+      else if (duty <= 0)
+      {
+        duty = 0;
+        dir = 1;
+      }
+    }
+
+
   }
   /* USER CODE END 3 */
 }

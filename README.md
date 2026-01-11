@@ -57,6 +57,29 @@ Basic GPIO output control. Toggles LED on PA5 every 500ms.
 
 ---
 
+### 002-breath – LED Breathing (Software PWM)
+
+Smooth LED breathing effect implemented using software PWM and precise microsecond delays based on the DWT cycle counter. The brightness is changed gradually while maintaining a continuous PWM signal to avoid visible flicker.
+
+[002-breath](002-breath) -- link to the project
+
+**Key characteristics**:
+- Software-generated PWM on GPIO pin PC13 (onboard LED, inverted logic)
+- PWM frequency ~1 kHz (no visible PWM flicker)
+- Brightness updated independently from PWM timing
+- Uses DWT CYCCNT for accurate microsecond delays
+
+**Topics covered**:
+- Software PWM implementation
+- Duty cycle control
+- Separation of PWM timing and fade timing
+- DWT cycle counter usage
+- Timing-related visual artifacts and their mitigation
+
+**Status**: Complete
+
+---
+
 ### Future Projects
 
 More projects will be added as I progress through learning STM32 development.

@@ -37,6 +37,8 @@ GND         ----->  GND
 3.3V        ----->  3V3 (optional)
 ```
 
+---
+
 ## Projects
 
 Each project is self-contained in its own directory with complete source code and configuration files.
@@ -47,36 +49,49 @@ Basic GPIO output control. Toggles LED on PA5 every 500ms.
 
 [001-blink/](001-blink) -- my Hello World
 
-**Topics covered**:
+Topics covered:
 - GPIO configuration
 - HAL library basics
 - System clock setup
 - Basic project structure
 
-**Status**: Complete
+Status: Complete
 
 ---
 
-### 002-breath – LED Breathing (Software PWM)
+### 002-breath - LED Breathing (Software PWM)
 
 Smooth LED breathing effect implemented using software PWM and precise microsecond delays based on the DWT cycle counter. The brightness is changed gradually while maintaining a continuous PWM signal to avoid visible flicker.
 
 [002-breath](002-breath) -- link to the project
 
-**Key characteristics**:
+Key characteristics:
 - Software-generated PWM on GPIO pin PC13 (onboard LED, inverted logic)
-- PWM frequency ~1 kHz (no visible PWM flicker)
+- PWM frequency approximately 1 kHz (no visible PWM flicker)
 - Brightness updated independently from PWM timing
 - Uses DWT CYCCNT for accurate microsecond delays
 
-**Topics covered**:
+Topics covered:
 - Software PWM implementation
 - Duty cycle control
 - Separation of PWM timing and fade timing
 - DWT cycle counter usage
 - Timing-related visual artifacts and their mitigation
 
-**Status**: Complete
+Status: Complete
+
+---
+
+### 003-display-i2c - SSD1306 I2C Test
+
+This project: 003-display-i2c
+
+- Minimal SSD1306 I2C example for STM32F4 using HAL.
+- Demonstrates display initialization, basic text and graphic routines, and I2C configuration.
+
+[003-display-i2c](003-display-i2c)
+
+Status: Complete
 
 ---
 

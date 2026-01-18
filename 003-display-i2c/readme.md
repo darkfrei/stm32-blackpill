@@ -1,4 +1,4 @@
-# 003-display-i2c - SSD1306 (SSD1106 with SSD1306 driver) I2C Test on STM32F4
+# 003-display-i2c - SSD1306 (SSD1106 with SSD1306 driver) I2C Test on STM32F4 (STM32F411CEU6 blackpill)
 
 ## Description
 

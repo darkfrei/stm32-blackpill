@@ -2,7 +2,7 @@
 /**
   ******************************************************************************
   * @file           : main.c
-  * @brief          : Simple OLED test program
+  * @brief          : Simple OLED test program for SSD1106
   ******************************************************************************
   */
 /* USER CODE END Header */

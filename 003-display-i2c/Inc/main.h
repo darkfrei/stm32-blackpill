@@ -59,16 +59,7 @@ void Error_Handler(void);
 /* Private defines -----------------------------------------------------------*/
 
 /* USER CODE BEGIN Private defines */
-/**
-int _write(int file, char *ptr, int len)
-{
-    for(int i = 0; i < len; i++)
-    {
-        ITM_SendChar(ptr[i]); // SWO
-    }
-    return len;
-}
-  */
+
 /* USER CODE END Private defines */
 
 #ifdef __cplusplus

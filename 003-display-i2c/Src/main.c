@@ -2,11 +2,20 @@
 /**
   ******************************************************************************
   * @file           : main.c
-  * @brief          : Simple OLED test program for SSD1106
+  * @brief          : LED Blink + OLED status display
+  ******************************************************************************
+  * @attention
+  *
+  * Copyright (c) 2026 STMicroelectronics.
+  * All rights reserved.
+  *
+  * This software is licensed under terms that can be found in the LICENSE file
+  * in the root directory of this software component.
+  * If no LICENSE file comes with this software, it is provided AS-IS.
+  *
   ******************************************************************************
   */
 /* USER CODE END Header */
-
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
 #include "i2c.h"
@@ -14,9 +23,9 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "i2c.h"
 #include "ssd1306.h"
 #include "ssd1306_fonts.h"
-#include <stdio.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -26,7 +35,8 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-
+#define BLINK_DELAY_MS 500     /* LED toggle interval (500 ms ON, 500 ms OFF) */
+#define OLED_UPDATE_MS 100     /* Update OLED screen every 100 ms */
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -43,10 +53,7 @@
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 /* USER CODE BEGIN PFP */
-void Test_Screen_1(void);
-void Test_Screen_2(void);
-void Test_Screen_3(void);
-void Test_Animation(void);
+static void DrawLED_Status(uint8_t led_state);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -54,208 +61,194 @@ void Test_Animation(void);
 
 /* USER CODE END 0 */
 
+/**
+  * @brief  The application entry point.
+  * @retval int
+  */
 int main(void)
 {
+
   /* USER CODE BEGIN 1 */
 
   /* USER CODE END 1 */
 
+  /* MCU Configuration--------------------------------------------------------*/
+
+  /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
   HAL_Init();
+
+  /* USER CODE BEGIN Init */
+
+  /* USER CODE END Init */
+
+  /* Configure the system clock */
   SystemClock_Config();
 
+  /* USER CODE BEGIN SysInit */
+
+  /* USER CODE END SysInit */
+
+  /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_I2C1_Init();
-
   /* USER CODE BEGIN 2 */
+  MX_I2C1_Init();
 
+  /* Initialize OLED display */
   if (ssd1306_Init() != SSD1306_OK) {
-    Error_Handler();
+      /* If OLED init fails, blink PC13 rapidly */
+      while(1) {
+          HAL_GPIO_TogglePin(GPIOC, GPIO_PIN_13);
+          HAL_Delay(100);
+      }
   }
 
-  HAL_Delay(100);
+  /* Clear screen */
+  ssd1306_Fill(Black);
+  ssd1306_UpdateScreen();
 
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
+
+  uint32_t lastBlink = HAL_GetTick();
+  uint32_t lastOledUpdate = HAL_GetTick();
+  uint8_t led_state = 0;  /* 0 = OFF, 1 = ON */
+
   while (1)
   {
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
 
-    Test_Screen_1();
-    HAL_Delay(5000);
+    uint32_t now = HAL_GetTick();
 
-    Test_Screen_2();
-    HAL_Delay(5000);
+    /* Toggle LED every BLINK_DELAY_MS */
+    if ((now - lastBlink) >= BLINK_DELAY_MS)
+    {
+      lastBlink = now;
 
-    Test_Screen_3();
-    HAL_Delay(5000);
+      HAL_GPIO_TogglePin(GPIOC, GPIO_PIN_13);
 
-    Test_Animation();
-    HAL_Delay(1000);
-
-    /* USER CODE END 3 */
-  }
-}
-
-/* USER CODE BEGIN 4 */
-
-void Test_Screen_1(void)
-{
-  ssd1306_Fill(Black);
-
-  ssd1306_DrawRectangle(0, 0, SSD1306_WIDTH - 1, SSD1306_HEIGHT - 1, White);
-
-  ssd1306_SetCursor(10, 10);
-  ssd1306_WriteString("SSD1306", Font_11x18, White);
-
-  ssd1306_SetCursor(10, 25);
-  ssd1306_WriteString("test screen", Font_7x10, White);
-
-  // Time in seconds
-  char buf1[20];
-  snprintf(buf1, sizeof(buf1), "Time: %lus", HAL_GetTick() / 1000);
-  ssd1306_SetCursor(10, 35);
-  ssd1306_WriteString(buf1, Font_6x8, White);
-
-  // Time in milliseconds
-  char buf2[20];
-  snprintf(buf2, sizeof(buf2), "Time: %lums", HAL_GetTick());
-  ssd1306_SetCursor(10, 45);
-  ssd1306_WriteString(buf2, Font_6x8, White);
-
-  ssd1306_UpdateScreen();
-}
-void Test_Screen_2(void)
-{
-  ssd1306_Fill(Black);
-
-  ssd1306_SetCursor(5, 5);
-  ssd1306_WriteString("Test 2: Shapes", Font_7x10, White);
-
-  ssd1306_DrawRectangle(5, 20, 35, 50, White);
-  ssd1306_FillRectangle(45, 20, 75, 50, White);
-
-  ssd1306_DrawCircle(100, 35, 15, White);
-  ssd1306_FillCircle(100, 35, 7, White);
-
-  ssd1306_UpdateScreen();
-}
-
-void Test_Screen_3(void)
-{
-  ssd1306_Fill(Black);
-
-  ssd1306_DrawRectangle(0, 0, SSD1306_WIDTH - 1, SSD1306_HEIGHT - 1, White);
-
-  ssd1306_SetCursor(5, 5);
-  ssd1306_WriteString("Lines Test", Font_7x10, White);
-
-  for (uint8_t i = 0; i <= 5; i++) {
-    ssd1306_Line(10, 20 + i * 8, 110, 20 + i * 8, White);
-  }
-
-
-
-  ssd1306_Line(10, 20, 10, 60, White);
-  ssd1306_Line(30, 20, 30, 60, White);
-  ssd1306_Line(50, 20, 50, 60, White);
-  ssd1306_Line(70, 20, 70, 60, White);
-  ssd1306_Line(90, 20, 90, 60, White);
-  ssd1306_Line(110, 20, 110, 60, White);
-
-  ssd1306_Line(10, 20, 110, 60, White);
-  ssd1306_Line(110, 20, 10, 60, White);
-
-  ssd1306_UpdateScreen();
-}
-
-void Test_Animation(void)
-{
-  uint8_t radius = 8;
-  uint8_t x_min = radius + 2;
-  uint8_t x_max = SSD1306_WIDTH - radius - 2;
-  uint8_t y = 30;
-
-  for (uint8_t cycle = 0; cycle < 2; cycle++) {
-
-    for (uint8_t x = x_min; x < x_max; x += 2) {
-      ssd1306_Fill(Black);
-
-      ssd1306_SetCursor(20, 5);
-      ssd1306_WriteString("Animation", Font_7x10, White);
-
-      ssd1306_FillCircle(x, y, radius, White);
-      ssd1306_DrawRectangle(0, 40, SSD1306_WIDTH - 1, 45, White);
-
-      ssd1306_UpdateScreen();
-      HAL_Delay(20);
+      /* Update state (inverted logic: RESET = ON, SET = OFF) */
+      led_state = (HAL_GPIO_ReadPin(GPIOC, GPIO_PIN_13) == GPIO_PIN_RESET) ? 1 : 0;
     }
 
-    for (uint8_t x = x_max; x > x_min; x -= 2) {
+    /* Update OLED display periodically */
+    if ((now - lastOledUpdate) >= OLED_UPDATE_MS)
+    {
+      lastOledUpdate = now;
+
       ssd1306_Fill(Black);
 
-      ssd1306_SetCursor(20, 5);
-      ssd1306_WriteString("Animation", Font_7x10, White);
+      /* Draw border */
+          ssd1306_DrawRectangle(0, 0, SSD1306_WIDTH-1, SSD1306_HEIGHT-1, White);
 
-      ssd1306_FillCircle(x, y, radius, White);
-      ssd1306_DrawRectangle(0, 40, SSD1306_WIDTH - 1, 45, White);
+          /* Display LED status */
+              ssd1306_SetCursor(10, 18);
+              ssd1306_WriteString("Test", Font_7x10, White);
+              ssd1306_SetCursor(40, 10);
+              ssd1306_WriteString("SSD1306", Font_11x18, White);
 
-      ssd1306_UpdateScreen();
-      HAL_Delay(20);
+      DrawLED_Status(led_state);
     }
+
   }
+  /* USER CODE END 3 */
 }
 
-/* USER CODE END 4 */
-
+/**
+  * @brief System Clock Configuration
+  * @retval None
+  */
 void SystemClock_Config(void)
 {
   RCC_OscInitTypeDef RCC_OscInitStruct = {0};
   RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
 
+  /** Configure the main internal regulator output voltage
+  */
   __HAL_RCC_PWR_CLK_ENABLE();
   __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE1);
 
+  /** Initializes the RCC Oscillators according to the specified parameters
+  * in the RCC_OscInitTypeDef structure.
+  */
   RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI;
   RCC_OscInitStruct.HSIState = RCC_HSI_ON;
   RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
-  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
-  RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSI;
-  RCC_OscInitStruct.PLL.PLLM = 8;
-  RCC_OscInitStruct.PLL.PLLN = 100;
-  RCC_OscInitStruct.PLL.PLLP = RCC_PLLP_DIV2;
-  RCC_OscInitStruct.PLL.PLLQ = 4;
+  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_NONE;
   if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
   {
     Error_Handler();
   }
 
+  /** Initializes the CPU, AHB and APB buses clocks
+  */
   RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
                               |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
-  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
+  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_HSI;
   RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
-  RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV2;
+  RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV1;
   RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;
 
-  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_3) != HAL_OK)
+  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_0) != HAL_OK)
   {
     Error_Handler();
   }
 }
 
+/* USER CODE BEGIN 4 */
+
+static void DrawLED_Status(uint8_t led_state)
+{
+
+
+
+
+    /* Display LED status */
+    ssd1306_SetCursor(10, 30);
+    ssd1306_WriteString("LED Status:", Font_7x10, White);
+
+    ssd1306_SetCursor(10, 40);
+    if (led_state)
+        ssd1306_WriteString("ON", Font_11x18, White);
+    else
+        ssd1306_WriteString("OFF", Font_11x18, White);
+
+    ssd1306_UpdateScreen();
+}
+
+/* USER CODE END 4 */
+
+/**
+  * @brief  This function is executed in case of error occurrence.
+  * @retval None
+  */
 void Error_Handler(void)
 {
+  /* USER CODE BEGIN Error_Handler_Debug */
+  /* User can add his own implementation to report the HAL error return state */
   __disable_irq();
   while (1)
   {
   }
+  /* USER CODE END Error_Handler_Debug */
 }
-
 #ifdef USE_FULL_ASSERT
+/**
+  * @brief  Reports the name of the source file and the source line number
+  *         where the assert_param error has occurred.
+  * @param  file: pointer to the source file name
+  * @param  line: assert_param error line source number
+  * @retval None
+  */
 void assert_failed(uint8_t *file, uint32_t line)
 {
+  /* USER CODE BEGIN 6 */
+  /* User can add his own implementation to report the file name and line number,
+     ex: printf("Wrong parameters value: file %s on line %d\r\n", file, line) */
+  /* USER CODE END 6 */
 }
-#endif
+#endif /* USE_FULL_ASSERT */

@@ -596,3 +596,72 @@ void ssd1306_SetDisplayOn(const uint8_t on) {
 uint8_t ssd1306_GetDisplayOn() {
     return SSD1306.DisplayOn;
 }
+
+// --------------------------------------------------------------
+// --------------------------------------------------------------
+// --------------------------------------------------------------
+
+/* external state for incremental update */
+// uint16_t ssd1306UpdatePosition = 0; /* byte offset in buffer */
+// uint8_t  ssd1306UpdatePage     = 0; /* current page index */
+// uint8_t  ssd1306CursorX        = 0; /* x position inside page */
+
+uint16_t ssd1306UpdatePosition = 0; /* byte offset in buffer */
+uint8_t  ssd1306UpdatePage     = 0; /* current page */
+uint8_t  ssd1306CursorX        = 0; /* x position inside page */
+
+
+/* number of bytes to send in one update call */
+#ifndef SSD1306_UPDATE_CHUNK_SIZE
+#define SSD1306_UPDATE_CHUNK_SIZE 32U
+#endif
+
+void ssd1306_UpdateScreenChunk(void)
+{
+    const uint16_t totalSize = SSD1306_WIDTH * (SSD1306_HEIGHT / 8U);
+    uint16_t remaining;
+    uint16_t bytesToSend;
+    uint8_t page;
+    uint8_t x;
+
+    if (ssd1306UpdatePosition >= totalSize) {
+        ssd1306UpdatePosition = 0;
+    }
+
+    /* calculate current page and x position */
+    page = ssd1306UpdatePosition / SSD1306_WIDTH;
+    x    = ssd1306UpdatePosition % SSD1306_WIDTH;
+
+    ssd1306UpdatePage = page;
+    ssd1306CursorX    = x;
+
+    /* set page and column address */
+    ssd1306_WriteCommand(0xB0 + page);
+    ssd1306_WriteCommand(0x00 + ((x + SSD1306_X_OFFSET_LOWER) & 0x0F));
+    ssd1306_WriteCommand(0x10 + (((x + SSD1306_X_OFFSET_UPPER) >> 4) & 0x0F));
+
+    /* limit transfer to page boundary */
+    remaining = SSD1306_WIDTH - x;
+    bytesToSend = SSD1306_UPDATE_CHUNK_SIZE;
+
+    if (bytesToSend > remaining) {
+        bytesToSend = remaining;
+    }
+
+    if (ssd1306UpdatePosition + bytesToSend > totalSize) {
+        bytesToSend = totalSize - ssd1306UpdatePosition;
+    }
+
+    /* send data */
+    ssd1306_WriteData(&SSD1306_Buffer[ssd1306UpdatePosition], bytesToSend);
+
+    /* advance position */
+    ssd1306UpdatePosition += bytesToSend;
+
+    /* reset after full frame */
+    if (ssd1306UpdatePosition >= totalSize) {
+        ssd1306UpdatePosition = 0;
+        ssd1306UpdatePage = 0;
+        ssd1306CursorX = 0;
+    }
+}

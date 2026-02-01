@@ -23,6 +23,7 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include <stdio.h>
 #include "i2c.h"
 #include "ssd1306.h"
 #include "ssd1306_fonts.h"
@@ -36,7 +37,8 @@
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
 #define BLINK_DELAY_MS 500     /* LED toggle interval (500 ms ON, 500 ms OFF) */
-#define OLED_UPDATE_MS 100     /* Update OLED screen every 100 ms */
+
+
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -47,13 +49,15 @@
 /* Private variables ---------------------------------------------------------*/
 
 /* USER CODE BEGIN PV */
-
+uint32_t screen_update_counter = 0;
+uint32_t last_ups_calc = 0;
+uint32_t ups_value = 0;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 /* USER CODE BEGIN PFP */
-static void DrawLED_Status(uint8_t led_state);
+
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -107,6 +111,8 @@ int main(void)
   ssd1306_Fill(Black);
   ssd1306_UpdateScreen();
 
+  last_ups_calc = HAL_GetTick();
+
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -115,6 +121,7 @@ int main(void)
   uint32_t lastBlink = HAL_GetTick();
   uint32_t lastOledUpdate = HAL_GetTick();
   uint8_t led_state = 0;  /* 0 = OFF, 1 = ON */
+  char buffer[32];
 
   while (1)
   {
@@ -135,24 +142,40 @@ int main(void)
       led_state = (HAL_GPIO_ReadPin(GPIOC, GPIO_PIN_13) == GPIO_PIN_RESET) ? 1 : 0;
     }
 
-    /* Update OLED display periodically */
-    if ((now - lastOledUpdate) >= OLED_UPDATE_MS)
+    /* Update OLED display continuously */
+    screen_update_counter++;
+
+    /* Calculate UPS every second */
+    if ((now - last_ups_calc) >= 1000)
     {
-      lastOledUpdate = now;
-
-      ssd1306_Fill(Black);
-
-      /* Draw border */
-          ssd1306_DrawRectangle(0, 0, SSD1306_WIDTH-1, SSD1306_HEIGHT-1, White);
-
-          /* Display LED status */
-              ssd1306_SetCursor(10, 18);
-              ssd1306_WriteString("Test", Font_7x10, White);
-              ssd1306_SetCursor(40, 10);
-              ssd1306_WriteString("SSD1306", Font_11x18, White);
-
-      DrawLED_Status(led_state);
+      ups_value = screen_update_counter;
+      screen_update_counter = 0;
+      last_ups_calc = now;
     }
+
+    ssd1306_Fill(Black);
+
+    /* Draw border */
+    ssd1306_DrawRectangle(0, 0, SSD1306_WIDTH-1, SSD1306_HEIGHT-1, White);
+
+    /* Display title */
+    ssd1306_SetCursor(4, 10);
+    ssd1306_WriteString("Test", Font_7x10, White);
+    ssd1306_SetCursor(40, 2);
+    ssd1306_WriteString("SSD1306", Font_11x18, White);
+
+    /* Display LED status */
+    snprintf(buffer, sizeof(buffer), "LED:%s", led_state ? "ON " : "OFF");
+    ssd1306_SetCursor(4, 20);
+    ssd1306_WriteString(buffer, Font_6x8, White);
+
+    /* Display UPS */
+    snprintf(buffer, sizeof(buffer), "UPS:%lu", (unsigned long)ups_value);
+    ssd1306_SetCursor(4, 30);
+    ssd1306_WriteString(buffer, Font_6x8, White);
+
+//    ssd1306_UpdateScreen();
+    ssd1306_UpdateScreenChunk();
 
   }
   /* USER CODE END 3 */
@@ -201,24 +224,6 @@ void SystemClock_Config(void)
 
 /* USER CODE BEGIN 4 */
 
-static void DrawLED_Status(uint8_t led_state)
-{
-
-
-
-
-    /* Display LED status */
-    ssd1306_SetCursor(10, 30);
-    ssd1306_WriteString("LED Status:", Font_7x10, White);
-
-    ssd1306_SetCursor(10, 40);
-    if (led_state)
-        ssd1306_WriteString("ON", Font_11x18, White);
-    else
-        ssd1306_WriteString("OFF", Font_11x18, White);
-
-    ssd1306_UpdateScreen();
-}
 
 /* USER CODE END 4 */
 

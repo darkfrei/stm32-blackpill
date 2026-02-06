@@ -1,3 +1,4 @@
+// file ssd1306.с
 #include "ssd1306.h"
 #include <math.h>
 #include <stdlib.h>
@@ -193,6 +194,7 @@ void ssd1306_UpdateScreen(void) {
         ssd1306_WriteCommand(0xB0 + i); // Set the current RAM page address.
         ssd1306_WriteCommand(0x00 + SSD1306_X_OFFSET_LOWER);
         ssd1306_WriteCommand(0x10 + SSD1306_X_OFFSET_UPPER);
+        
         ssd1306_WriteData(&SSD1306_Buffer[SSD1306_WIDTH*i],SSD1306_WIDTH);
     }
 }
@@ -322,7 +324,7 @@ void ssd1306_Polyline(const SSD1306_VERTEX *par_vertex, uint16_t par_size, SSD13
 
 /* Convert Degrees to Radians */
 static float ssd1306_DegToRad(float par_deg) {
-    return par_deg * (3.14f / 180.0f);
+    return par_deg * (3.14159f / 180.0f);
 }
 
 /* Normalize degree to [0;360] */
@@ -601,15 +603,15 @@ uint8_t ssd1306_GetDisplayOn() {
 // --------------------------------------------------------------
 // --------------------------------------------------------------
 
-/* external state for incremental update */
-// uint16_t ssd1306UpdatePosition = 0; /* byte offset in buffer */
-// uint8_t  ssd1306UpdatePage     = 0; /* current page index */
-// uint8_t  ssd1306CursorX        = 0; /* x position inside page */
+/* ensure x offset macro exists */
+#ifndef SSD1306_X_OFFSET
+#define SSD1306_X_OFFSET 0
+#endif
 
-uint16_t ssd1306UpdatePosition = 0; /* byte offset in buffer */
-uint8_t  ssd1306UpdatePage     = 0; /* current page */
-uint8_t  ssd1306CursorX        = 0; /* x position inside page */
-
+/* external state for incremental update visible to other translation units */
+volatile uint16_t ssd1306UpdatePosition = 0; /* byte offset in buffer */
+volatile uint8_t  ssd1306UpdatePage     = 0; /* current page index */
+volatile uint8_t  ssd1306CursorX        = 0; /* x position inside page */
 
 /* number of bytes to send in one update call */
 #ifndef SSD1306_UPDATE_CHUNK_SIZE
@@ -618,45 +620,54 @@ uint8_t  ssd1306CursorX        = 0; /* x position inside page */
 
 void ssd1306_UpdateScreenChunk(void)
 {
-    const uint16_t totalSize = SSD1306_WIDTH * (SSD1306_HEIGHT / 8U);
-    uint16_t remaining;
+    const uint16_t totalSize = (uint16_t)(SSD1306_WIDTH * (SSD1306_HEIGHT / 8U));
     uint16_t bytesToSend;
     uint8_t page;
     uint8_t x;
+    uint16_t remainingInPage;
+    uint16_t effectivePos;
 
+    /* normalize position if out of bounds */
     if (ssd1306UpdatePosition >= totalSize) {
         ssd1306UpdatePosition = 0;
     }
 
-    /* calculate current page and x position */
-    page = ssd1306UpdatePosition / SSD1306_WIDTH;
-    x    = ssd1306UpdatePosition % SSD1306_WIDTH;
+    effectivePos = ssd1306UpdatePosition;
+
+    /* calculate current page and x position from linear byte offset */
+    page = (uint8_t)(effectivePos / SSD1306_WIDTH);
+    x    = (uint8_t)(effectivePos % SSD1306_WIDTH);
 
     ssd1306UpdatePage = page;
     ssd1306CursorX    = x;
 
-    /* set page and column address */
-    ssd1306_WriteCommand(0xB0 + page);
-    ssd1306_WriteCommand(0x00 + ((x + SSD1306_X_OFFSET_LOWER) & 0x0F));
-    ssd1306_WriteCommand(0x10 + (((x + SSD1306_X_OFFSET_UPPER) >> 4) & 0x0F));
+    /* set page and column address in page addressing mode */
+    ssd1306_WriteCommand((uint8_t)(0xB0 + page));
 
-    /* limit transfer to page boundary */
-    remaining = SSD1306_WIDTH - x;
-    bytesToSend = SSD1306_UPDATE_CHUNK_SIZE;
+    /* compute column start = x + X_OFFSET */
+    uint16_t col = (uint16_t)x + (uint16_t)SSD1306_X_OFFSET;
+    /* lower nibble */
+    ssd1306_WriteCommand((uint8_t)(0x00 + (col & 0x0F)));
+    /* upper nibble (4..7 bits) */
+    ssd1306_WriteCommand((uint8_t)(0x10 + ((col >> 4) & 0x0F)));
 
-    if (bytesToSend > remaining) {
-        bytesToSend = remaining;
+    /* limit transfer to remaining bytes in the current page row */
+    remainingInPage = (uint16_t)SSD1306_WIDTH - (uint16_t)x;
+
+    bytesToSend = (uint16_t)SSD1306_UPDATE_CHUNK_SIZE;
+    if (bytesToSend > remainingInPage) {
+        bytesToSend = remainingInPage;
     }
 
-    if (ssd1306UpdatePosition + bytesToSend > totalSize) {
-        bytesToSend = totalSize - ssd1306UpdatePosition;
+    if ((uint32_t)effectivePos + bytesToSend > totalSize) {
+        bytesToSend = (uint16_t)(totalSize - effectivePos);
     }
 
-    /* send data */
-    ssd1306_WriteData(&SSD1306_Buffer[ssd1306UpdatePosition], bytesToSend);
-
-    /* advance position */
-    ssd1306UpdatePosition += bytesToSend;
+    /* send the data chunk (single page boundary guaranteed) */
+    if (bytesToSend > 0) {
+        ssd1306_WriteData(&SSD1306_Buffer[effectivePos], bytesToSend);
+        ssd1306UpdatePosition = (uint16_t)(effectivePos + bytesToSend);
+    }
 
     /* reset after full frame */
     if (ssd1306UpdatePosition >= totalSize) {

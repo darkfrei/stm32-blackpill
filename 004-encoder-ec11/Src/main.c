@@ -35,6 +35,11 @@ volatile uint16_t encoder_state = 0;
 volatile uint8_t led_blink_request = 0;
 volatile uint8_t led_blink_active = 0;
 volatile uint32_t led_blink_start = 0;
+
+/* ups calculation variables */
+volatile uint32_t loop_counter = 0;
+volatile uint32_t last_ups_update = 0;
+volatile float ups_value = 0.0f;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -132,19 +137,21 @@ int main(void)
   /* ensure led is off (pc13 active low) */
   HAL_GPIO_WritePin(GPIOC, GPIO_PIN_13, GPIO_PIN_SET);
 
-  if (SSD1306_Init() == 0)
+  if (ssd1306_Init() == 0)
   {
-      SSD1306_Clear();
-      SSD1306_GotoXY(0, 0);
-      SSD1306_Puts("Encoder EN11", 1);
-      SSD1306_GotoXY(0, 20);
-      SSD1306_Puts("Value:", 1);
-      SSD1306_UpdateScreen();
+      ssd1306_Fill(Black);
+      ssd1306_SetCursor(0, 0);
+      ssd1306_WriteString("Encoder EN11", Font_7x10, White);
+      ssd1306_SetCursor(0, 20);
+      ssd1306_WriteString("Value:", Font_7x10, White);
+      ssd1306_UpdateScreen();
   }
   else
   {
       while (1);
   }
+
+  last_ups_update = HAL_GetTick();
 
   /* USER CODE END 2 */
 
@@ -152,21 +159,44 @@ int main(void)
   /* USER CODE BEGIN WHILE */
   while (1)
   {
+    loop_counter++;
+
+    /* calculate ups every 1000ms */
+    uint32_t current_time = HAL_GetTick();
+    if ((current_time - last_ups_update) >= 1000)
+    {
+        uint32_t elapsed = current_time - last_ups_update;
+        ups_value = (float)loop_counter * 1000.0f / (float)elapsed;
+        loop_counter = 0;
+        last_ups_update = current_time;
+    }
+
     snprintf(buffer, sizeof(buffer), "Value: %ld    ", encoder_value);
-    SSD1306_GotoXY(0, 20);
-    SSD1306_Puts(buffer, 1);
+    ssd1306_SetCursor(0, 20);
+    ssd1306_WriteString(buffer, Font_7x10, White);
 
     if (encoder_button_pressed)
     {
-        SSD1306_GotoXY(0, 40);
-        SSD1306_Puts("PRESSED!", 1);
+        ssd1306_SetCursor(0, 40);
+        ssd1306_WriteString("PRESSED!", Font_7x10, White);
         encoder_button_pressed = 0;
     }
     else
     {
-        SSD1306_GotoXY(0, 40);
-        SSD1306_Puts("        ", 1);
+        ssd1306_SetCursor(0, 40);
+        ssd1306_WriteString("        ", Font_7x10, White);
     }
+
+    /* display ups */
+    snprintf(buffer, sizeof(buffer), "UPS: %.2f   ", ups_value);
+    ssd1306_SetCursor(0, 54);
+    ssd1306_WriteString(buffer, Font_6x8, White);
+
+    /* display led status */
+    uint8_t led_state = HAL_GPIO_ReadPin(GPIOC, GPIO_PIN_13);
+    snprintf(buffer, sizeof(buffer), "LED: %s", (led_state == GPIO_PIN_RESET) ? "ON " : "OFF");
+    ssd1306_SetCursor(64, 54);
+    ssd1306_WriteString(buffer, Font_6x8, White);
 
     /* non-blocking led blink */
     if (led_blink_request && !led_blink_active)
@@ -186,7 +216,7 @@ int main(void)
         }
     }
 
-    SSD1306_UpdateScreen();
+    ssd1306_UpdateScreen();
     HAL_Delay(50);
   /* USER CODE END WHILE */
 

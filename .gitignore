@@ -1,9 +1,12 @@
+# .gitignore
 # Build folders
 Debug/
 Release/
 Build/
+.build/
+.make/
 
-# thousands of temporary files
+# Temporary and generated files
 *.o
 *.d
 *.su
@@ -13,19 +16,19 @@ Build/
 *.hex
 *.map
 *.list
+*.log
+*~
+*.swp
+*.zip
 
-# Eclipse/STM32CubeIDE
+# Eclipse/STM32CubeIDE metadata
 .metadata/
 .settings/
-.cproject
-.project
-.mxproject
+# .cproject
+# .project
+# .mxproject
 
-# CubeIDE temp
-.build/
-.make/
-
-# Generated files (can be regenerated from .ioc)
+# Auto-generated HAL/CMSIS files (can be regenerated from .ioc)
 Drivers/
 Core/Inc/stm32f4xx_hal_conf.h
 Core/Inc/stm32f4xx_it.h
@@ -43,7 +46,5 @@ Core/Src/system_stm32f4xx.c
 !Makefile
 !README.md
 
-# misc
-*.log
-*~ 
-*.swp
+# Ignore batch scripts
+*.bat

@@ -49,20 +49,23 @@
  */
 #ifndef SSD1306_UPDATE_CHUNK_SIZE_POW
 
+/* UPS is correct for the example only */
+
 /* uncomment exactly one value */
 
-// #define SSD1306_UPDATE_CHUNK_SIZE_POW 10  /* 1024 bytes per update call, ca. 23.0 ms per call */
-// #define SSD1306_UPDATE_CHUNK_SIZE_POW 9   /*  512 bytes per update call, ca. 11.5 ms per call */
-// #define SSD1306_UPDATE_CHUNK_SIZE_POW 8   /*  256 bytes per update call, ca. 5.8 ms per call  */
-// #define SSD1306_UPDATE_CHUNK_SIZE_POW 7   /*  128 bytes per update call, ca. 2.9 ms per call  */
-// #define SSD1306_UPDATE_CHUNK_SIZE_POW 6   /*   64 bytes per update call, ca. 1.4 ms per call  */
-#define SSD1306_UPDATE_CHUNK_SIZE_POW 5   /*   32 bytes per update call, ca. 0.7 ms per call  */
-// #define SSD1306_UPDATE_CHUNK_SIZE_POW 4   /*   16 bytes per update call, ca. 0.36 ms per call */
-// #define SSD1306_UPDATE_CHUNK_SIZE_POW 3   /*    8 bytes per update call, ca. 0.18 ms per call */
-// #define SSD1306_UPDATE_CHUNK_SIZE_POW 2   /*    4 bytes per update call, ca. 0.09 ms per call */
-// #define SSD1306_UPDATE_CHUNK_SIZE_POW 1   /*    2 bytes per update call, ca. 0.05 ms per call */
-// #define SSD1306_UPDATE_CHUNK_SIZE_POW 0   /*    1 byte  per update call, ca. 0.02 ms per call */
+// #define SSD1306_UPDATE_CHUNK_SIZE_POW 10  /* 1024 bytes per update call, UPS: 240 */
+// #define SSD1306_UPDATE_CHUNK_SIZE_POW 9   /*  512 bytes per update call, UPS: 240 */
+// #define SSD1306_UPDATE_CHUNK_SIZE_POW 8   /*  256 bytes per update call, UPS: 240 */
+// #define SSD1306_UPDATE_CHUNK_SIZE_POW 7   /*  128 bytes per update call, UPS: 240 (yes, same) */
+// #define SSD1306_UPDATE_CHUNK_SIZE_POW 6   /*   64 bytes per update call, UPS: 430  */
+// #define SSD1306_UPDATE_CHUNK_SIZE_POW 5   /*   32 bytes per update call, UPS: 712  */
+#define SSD1306_UPDATE_CHUNK_SIZE_POW 4   /*   16 bytes per update call, UPS: 1062 */
+// #define SSD1306_UPDATE_CHUNK_SIZE_POW 3   /*    8 bytes per update call, UPS: 1406 */
+// #define SSD1306_UPDATE_CHUNK_SIZE_POW 2   /*    4 bytes per update call, UPS: 1682 */
 
+ /* LOWE THAN SSD1306_UPDATE_CHUNK_SIZE_POW 2   -    4 bytes per update call DOESNT WORK */
+ /* LOWE THAN SSD1306_UPDATE_CHUNK_SIZE_POW 2   -    4 bytes per update call DOESNT WORK */
+ /* LOWE THAN SSD1306_UPDATE_CHUNK_SIZE_POW 2   -    4 bytes per update call DOESNT WORK */
 
 #endif
 

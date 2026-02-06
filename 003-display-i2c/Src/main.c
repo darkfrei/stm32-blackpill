@@ -36,8 +36,8 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-#define BLINK_DELAY_MS 500     /* LED toggle interval (500 ms ON, 500 ms OFF) */
-#define BUFFER_REDRAW_MS 200   /* Redraw buffer every 200 ms */
+/* LED toggle interval (500 ms ON, 500 ms OFF) and Redraw buffer every 500 ms */
+#define UPDATE_DELAY_MS 500
 
 /* USER CODE END PD */
 
@@ -118,8 +118,8 @@ int main(void)
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
 
-  uint32_t lastBlink = HAL_GetTick();
-  uint32_t lastBufferRedraw = HAL_GetTick();
+  uint32_t lastUpdate = HAL_GetTick();
+
   uint8_t led_state = 0;  /* 0 = OFF, 1 = ON */
   char buffer[32];
 
@@ -131,21 +131,21 @@ int main(void)
 
     uint32_t now = HAL_GetTick();
 
-    /* Toggle LED every BLINK_DELAY_MS */
-    if ((now - lastBlink) >= BLINK_DELAY_MS)
-    {
-      lastBlink = now;
 
+    /* Toggle LED every UPDATE_DELAY_MS */
+    /* Redraw buffer every UPDATE_DELAY_MS */
+
+    if ((now - lastUpdate) >= UPDATE_DELAY_MS)
+    {
+      lastUpdate = now;
+
+      // Toggle LED
       HAL_GPIO_TogglePin(GPIOC, GPIO_PIN_13);
 
-      /* Update state (inverted logic: RESET = ON, SET = OFF) */
-      led_state = (HAL_GPIO_ReadPin(GPIOC, GPIO_PIN_13) == GPIO_PIN_RESET) ? 1 : 0;
-    }
+        /* Update state (inverted logic: RESET = ON, SET = OFF) */
+        led_state = (HAL_GPIO_ReadPin(GPIOC, GPIO_PIN_13) == GPIO_PIN_RESET) ? 1 : 0;
 
-    /* Redraw buffer every BUFFER_REDRAW_MS */
-    if ((now - lastBufferRedraw) >= BUFFER_REDRAW_MS)
-    {
-      lastBufferRedraw = now;
+      //
 
       ssd1306_Fill(Black);
 

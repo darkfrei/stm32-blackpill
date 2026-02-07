@@ -1,4 +1,4 @@
-# Blackpill Test 003: SSD1306 OLED Display via I2C
+# Blackpill Test 003: SSD1306 (SSH1106) OLED Display via I2C
 
 This project tests and demonstrates how to use an SSD1306 OLED display with a **Blackpill STM32** microcontroller using the **I2C** communication protocol.
 
@@ -22,7 +22,7 @@ The main goal is to verify reliable I2C communication and to experiment with **o
 ### Hardware
 
 1. STM32F411CE Blackpill board
-2. SSD1306 OLED display (128×64, I2C interface)
+2. SSD1306 (SSH1106) OLED display (128×64, I2C interface)
 3. Breadboard and jumper wires
 4. USB cable for programming and power
 
@@ -156,7 +156,7 @@ I2C (Inter‑Integrated Circuit) uses two signals:
 - **SCL** - clock
 - **SDA** - data
 
-Multiple devices can share the bus. The SSD1306 typically uses address **0x3C**.
+Multiple devices can share the bus. The SSD1306 (SSH1106) typically uses address **0x3C**.
 
 ### Screen Buffer (Framebuffer)
 
@@ -193,7 +193,7 @@ Updates specify both the **page number** and the **column address**.
 - Try lowering I2C speed to **100 kHz**
 - Verify the initialization sequence in `ssd1306_Init()`
 - Check stack and heap sizes
-- Adjust sonstants in the ssd1306_conf.h: SSD1306_X_OFFSET 2 or 0
+- Adjust sonstants in the ssd1306_conf.h: SSD1306_X_OFFSET 2 (SSH1106) or 0 (SSD1306)
 
 ### Low UPS
 
@@ -239,6 +239,8 @@ After this test is working, you can:
 
 ## References
 
+- [Original driver](https://github.com/afiskon/stm32-ssd1306)
+- [SSD1306 Datasheet](https://cdn-shop.adafruit.com/datasheets/SSD1306.pdf)
 - [SSD1306 Datasheet](https://cdn-shop.adafruit.com/datasheets/SSD1306.pdf)
 - [STM32F411CE Reference Manual](https://www.st.com/resource/en/datasheet/stm32f411ce.pdf)
 - [I2C Protocol Specification](https://www.st.com/resource/en/application_note/dm00072315-using-the-i2c-bus-interface-in-stm32f0-stm32f3-stm32f4-stm32f7-and-stm32l0-stm32l1-stm32l4-series-stmicroelectronics.pdf) 

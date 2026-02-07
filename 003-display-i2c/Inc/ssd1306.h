@@ -1,6 +1,7 @@
+
 /**
- * This Library was originally written by Olivier Van den Eede (4ilo) in 2016.
- * Some refactoring was done and SPI support was added by Aleksander Alekseev (afiskon) in 2018.
+ * this library was originally written by olivier van den eede (4ilo) in 2016.
+ * some refactoring was done and spi support was added by aleksander alekseev (afiskon) in 2018.
  *
  * https://github.com/afiskon/stm32-ssd1306
  */
@@ -49,7 +50,7 @@ _BEGIN_STD_C
 #elif defined(STM32U5)
 #include "stm32u5xx_hal.h"
 #else
-#error "SSD1306 library was tested only on STM32F0, STM32F1, STM32F3, STM32F4, STM32F7, STM32L0, STM32L1, STM32L4, STM32H7, STM32G0, STM32G4, STM32WB, STM32C0, STM32U5 MCU families. Please modify ssd1306.h if you know what you are doing. Also please send a pull request if it turns out the library works on other MCU's as well!"
+#error "SSD1306 library was tested only on STM32F0, STM32F1, STM32F3, STM32F4, STM32F7, STM32L0, STM32L1, STM32L4, STM32H7, STM32G0, STM32G4, STM32WB, STM32C0, STM32U5 MCU families. please modify ssd1306.h if you know what you are doing. also please send a pull request if it turns out the library works on other MCU's as well!"
 #endif
 
 
@@ -61,7 +62,7 @@ _BEGIN_STD_C
 #define SSD1306_X_OFFSET_UPPER 0
 #endif
 
-/* vvv I2C config vvv */
+/* vvv i2c config vvv */
 
 #ifndef SSD1306_I2C_PORT
 #define SSD1306_I2C_PORT        hi2c1
@@ -71,9 +72,9 @@ _BEGIN_STD_C
 #define SSD1306_I2C_ADDR        (0x3C << 1)
 #endif
 
-/* ^^^ I2C config ^^^ */
+/* ^^^ i2c config ^^^ */
 
-/* vvv SPI config vvv */
+/* vvv spi config vvv */
 
 #ifndef SSD1306_SPI_PORT
 #define SSD1306_SPI_PORT        hspi2
@@ -100,22 +101,22 @@ _BEGIN_STD_C
 #define SSD1306_Reset_Pin       GPIO_PIN_8
 #endif
 
-/* ^^^ SPI config ^^^ */
+/* ^^^ spi config ^^^ */
 
 #if defined(SSD1306_USE_I2C)
 extern I2C_HandleTypeDef SSD1306_I2C_PORT;
 #elif defined(SSD1306_USE_SPI)
 extern SPI_HandleTypeDef SSD1306_SPI_PORT;
 #else
-#error "You should define SSD1306_USE_SPI or SSD1306_USE_I2C macro!"
+#error "you should define SSD1306_USE_SPI or SSD1306_USE_I2C macro!"
 #endif
 
-// SSD1306 OLED height in pixels
+// ssd1306 oled height in pixels
 #ifndef SSD1306_HEIGHT
 #define SSD1306_HEIGHT          64
 #endif
 
-// SSD1306 width in pixels
+// ssd1306 width in pixels
 #ifndef SSD1306_WIDTH
 #define SSD1306_WIDTH           128
 #endif
@@ -124,23 +125,26 @@ extern SPI_HandleTypeDef SSD1306_SPI_PORT;
 #define SSD1306_BUFFER_SIZE   SSD1306_WIDTH * SSD1306_HEIGHT / 8
 #endif
 
-// Enumeration for screen colors
+// enumeration for screen colors
 typedef enum {
-    Black = 0x00, // Black color, no pixel
-    White = 0x01  // Pixel is set. Color depends on OLED
+    Black = 0x00, // black color, no pixel
+    White = 0x01  // pixel is set. color depends on oled
 } SSD1306_COLOR;
 
 typedef enum {
     SSD1306_OK = 0x00,
-    SSD1306_ERR = 0x01  // Generic error.
+    SSD1306_ERR = 0x01  // generic error.
 } SSD1306_Error_t;
 
-// Struct to store transformations
+// struct to store transformations
 typedef struct {
     uint16_t CurrentX;
     uint16_t CurrentY;
     uint8_t Initialized;
     uint8_t DisplayOn;
+    uint8_t Dirty;                    // flag indicating buffer was modified
+    uint16_t DirtyStart;              // start of modified region
+    uint16_t DirtyEnd;                // end of modified region
 } SSD1306_t;
 
 typedef struct {
@@ -148,15 +152,15 @@ typedef struct {
     uint8_t y;
 } SSD1306_VERTEX;
 
-/** Font */
+/** font */
 typedef struct {
-	const uint8_t width;                /**< Font width in pixels */
-	const uint8_t height;               /**< Font height in pixels */
-	const uint16_t *const data;         /**< Pointer to font data array */
-    const uint8_t *const char_width;    /**< Proportional character width in pixels (NULL for monospaced) */
+    const uint8_t width;                /**< font width in pixels */
+    const uint8_t height;               /**< font height in pixels */
+    const uint16_t *const data;         /**< pointer to font data array */
+    const uint8_t *const char_width;    /**< proportional character width in pixels (NULL for monospaced) */
 } SSD1306_Font_t;
 
-// Procedure definitions
+// procedure definitions
 // void ssd1306_Init(void);
 SSD1306_Error_t ssd1306_Init(void);
 
@@ -164,14 +168,15 @@ void ssd1306_Fill(SSD1306_COLOR color);
 void ssd1306_UpdateScreen(void);
 
 
-// new:
+// incremental update functions
 void ssd1306_UpdateScreenChunk(void);
+void ssd1306_UpdateDirtyChunk(void);
 
 /* external tracking variables for incremental updater */
 extern volatile uint16_t ssd1306UpdatePosition;
 extern volatile uint8_t  ssd1306UpdatePage;
 extern volatile uint8_t  ssd1306CursorX;
-// end of new
+extern volatile uint8_t  ssd1306DirtyFlag;
 
 
 void ssd1306_DrawPixel(uint8_t x, uint8_t y, SSD1306_COLOR color);
@@ -188,12 +193,12 @@ void ssd1306_DrawRectangle(uint8_t x1, uint8_t y1, uint8_t x2, uint8_t y2, SSD13
 void ssd1306_FillRectangle(uint8_t x1, uint8_t y1, uint8_t x2, uint8_t y2, SSD1306_COLOR color);
 
 /**
- * @brief Invert color of pixels in rectangle (include border)
+ * @brief invert color of pixels in rectangle (include border)
  * 
- * @param x1 X Coordinate of top left corner
- * @param y1 Y Coordinate of top left corner
- * @param x2 X Coordinate of bottom right corner
- * @param y2 Y Coordinate of bottom right corner
+ * @param x1 x coordinate of top left corner
+ * @param y1 y coordinate of top left corner
+ * @param x2 x coordinate of bottom right corner
+ * @param y2 y coordinate of bottom right corner
  * @return SSD1306_Error_t status
  */
 SSD1306_Error_t ssd1306_InvertRectangle(uint8_t x1, uint8_t y1, uint8_t x2, uint8_t y2);
@@ -201,31 +206,36 @@ SSD1306_Error_t ssd1306_InvertRectangle(uint8_t x1, uint8_t y1, uint8_t x2, uint
 void ssd1306_DrawBitmap(uint8_t x, uint8_t y, const unsigned char* bitmap, uint8_t w, uint8_t h, SSD1306_COLOR color);
 
 /**
- * @brief Sets the contrast of the display.
+ * @brief sets the contrast of the display.
  * @param[in] value contrast to set.
- * @note Contrast increases as the value increases.
+ * @note contrast increases as the value increases.
  * @note RESET = 7Fh.
  */
 void ssd1306_SetContrast(const uint8_t value);
 
 /**
- * @brief Set Display ON/OFF.
+ * @brief set Display ON/OFF.
  * @param[in] on 0 for OFF, any for ON.
  */
 void ssd1306_SetDisplayOn(const uint8_t on);
 
 /**
- * @brief Reads DisplayOn state.
+ * @brief reads DisplayOn state.
  * @return  0: OFF.
  *          1: ON.
  */
 uint8_t ssd1306_GetDisplayOn();
 
-// Low-level procedures
+// low-level procedures
 void ssd1306_Reset(void);
 void ssd1306_WriteCommand(uint8_t byte);
 void ssd1306_WriteData(uint8_t* buffer, size_t buff_size);
 SSD1306_Error_t ssd1306_FillBuffer(uint8_t* buf, uint32_t len);
+
+// dma functions (if enabled)
+#ifdef SSD1306_USE_DMA
+void ssd1306_WriteData_DMA(uint8_t* buffer, size_t buff_size);
+#endif
 
 _END_STD_C
 

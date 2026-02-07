@@ -1,150 +1,207 @@
-// file ssd1306.с
+
+// file ssd1306.c
 #include "ssd1306.h"
 #include <math.h>
 #include <stdlib.h>
-#include <string.h>  // For memcpy
+#include <string.h>  // for memcpy
 
 #if defined(SSD1306_USE_I2C)
 
 void ssd1306_Reset(void) {
-    /* for I2C - do nothing */
+    /* for i2c - do nothing */
 }
 
-// Send a byte to the command register
+// send a byte to the command register
 void ssd1306_WriteCommand(uint8_t byte) {
     HAL_I2C_Mem_Write(&SSD1306_I2C_PORT, SSD1306_I2C_ADDR, 0x00, 1, &byte, 1, HAL_MAX_DELAY);
 }
 
-// Send data
+// send data
 void ssd1306_WriteData(uint8_t* buffer, size_t buff_size) {
     HAL_I2C_Mem_Write(&SSD1306_I2C_PORT, SSD1306_I2C_ADDR, 0x40, 1, buffer, buff_size, HAL_MAX_DELAY);
 }
 
+#ifdef SSD1306_USE_DMA
+void ssd1306_WriteData_DMA(uint8_t* buffer, size_t buff_size) {
+    static volatile uint8_t dma_busy = 0;
+    
+    // wait for previous transfer to complete
+    while(dma_busy) {
+        __NOP();
+    }
+    
+    dma_busy = 1;
+    if (HAL_I2C_Mem_Write_DMA(&SSD1306_I2C_PORT, SSD1306_I2C_ADDR, 0x40, 1, buffer, buff_size) != HAL_OK) {
+        dma_busy = 0;
+        // fall back to blocking write
+        ssd1306_WriteData(buffer, buff_size);
+    }
+}
+
+// i2c dma transfer complete callback (user must implement in main)
+void HAL_I2C_MemTxCpltCallback(I2C_HandleTypeDef *hi2c) {
+    if (hi2c->Instance == SSD1306_I2C_PORT.Instance) {
+        // signal that dma is free
+        // note: user should implement this in their main.c
+    }
+}
+#endif
+
 #elif defined(SSD1306_USE_SPI)
 
 void ssd1306_Reset(void) {
-    // CS = High (not selected)
+    // cs = high (not selected)
     HAL_GPIO_WritePin(SSD1306_CS_Port, SSD1306_CS_Pin, GPIO_PIN_SET);
 
-    // Reset the OLED
+    // reset the oled
     HAL_GPIO_WritePin(SSD1306_Reset_Port, SSD1306_Reset_Pin, GPIO_PIN_RESET);
     HAL_Delay(10);
     HAL_GPIO_WritePin(SSD1306_Reset_Port, SSD1306_Reset_Pin, GPIO_PIN_SET);
     HAL_Delay(10);
 }
 
-// Send a byte to the command register
+// send a byte to the command register
 void ssd1306_WriteCommand(uint8_t byte) {
-    HAL_GPIO_WritePin(SSD1306_CS_Port, SSD1306_CS_Pin, GPIO_PIN_RESET); // select OLED
+    HAL_GPIO_WritePin(SSD1306_CS_Port, SSD1306_CS_Pin, GPIO_PIN_RESET); // select oled
     HAL_GPIO_WritePin(SSD1306_DC_Port, SSD1306_DC_Pin, GPIO_PIN_RESET); // command
     HAL_SPI_Transmit(&SSD1306_SPI_PORT, (uint8_t *) &byte, 1, HAL_MAX_DELAY);
-    HAL_GPIO_WritePin(SSD1306_CS_Port, SSD1306_CS_Pin, GPIO_PIN_SET); // un-select OLED
+    HAL_GPIO_WritePin(SSD1306_CS_Port, SSD1306_CS_Pin, GPIO_PIN_SET); // un-select oled
 }
 
-// Send data
+// send data
 void ssd1306_WriteData(uint8_t* buffer, size_t buff_size) {
-    HAL_GPIO_WritePin(SSD1306_CS_Port, SSD1306_CS_Pin, GPIO_PIN_RESET); // select OLED
+    HAL_GPIO_WritePin(SSD1306_CS_Port, SSD1306_CS_Pin, GPIO_PIN_RESET); // select oled
     HAL_GPIO_WritePin(SSD1306_DC_Port, SSD1306_DC_Pin, GPIO_PIN_SET); // data
     HAL_SPI_Transmit(&SSD1306_SPI_PORT, buffer, buff_size, HAL_MAX_DELAY);
-    HAL_GPIO_WritePin(SSD1306_CS_Port, SSD1306_CS_Pin, GPIO_PIN_SET); // un-select OLED
+    HAL_GPIO_WritePin(SSD1306_CS_Port, SSD1306_CS_Pin, GPIO_PIN_SET); // un-select oled
 }
 
 #else
-#error "You should define SSD1306_USE_SPI or SSD1306_USE_I2C macro"
+#error "you should define SSD1306_USE_SPI or SSD1306_USE_I2C macro"
 #endif
 
 
-// Screenbuffer
+// screenbuffer
+#ifdef SSD1306_DOUBLE_BUFFER
 static uint8_t SSD1306_Buffer[SSD1306_BUFFER_SIZE];
+static uint8_t SSD1306_BackBuffer[SSD1306_BUFFER_SIZE];
+#else
+static uint8_t SSD1306_Buffer[SSD1306_BUFFER_SIZE];
+#endif
 
-// Screen object
+// screen object
 static SSD1306_t SSD1306;
 
-/* Fills the Screenbuffer with values from a given buffer of a fixed length */
+/* external state for incremental updater */
+volatile uint16_t ssd1306UpdatePosition = 0; /* byte offset in buffer */
+volatile uint8_t  ssd1306UpdatePage     = 0; /* current page index */
+volatile uint8_t  ssd1306CursorX        = 0; /* x position inside page */
+volatile uint8_t  ssd1306DirtyFlag      = 0; /* dirty region flag */
+
+/* number of bytes to send in one update call */
+#ifndef SSD1306_UPDATE_CHUNK_SIZE
+#define SSD1306_UPDATE_CHUNK_SIZE 32U
+#endif
+
+/* helper function to mark region as dirty */
+static void ssd1306_MarkDirty(uint16_t start, uint16_t end) {
+    if (start > end) {
+        uint16_t temp = start;
+        start = end;
+        end = temp;
+    }
+    
+    if (SSD1306.Dirty) {
+        if (start < SSD1306.DirtyStart) SSD1306.DirtyStart = start;
+        if (end > SSD1306.DirtyEnd) SSD1306.DirtyEnd = end;
+    } else {
+        SSD1306.Dirty = 1;
+        SSD1306.DirtyStart = start;
+        SSD1306.DirtyEnd = end;
+    }
+    
+    ssd1306DirtyFlag = 1;
+}
+
+/* fills the screenbuffer with values from a given buffer of a fixed length */
 SSD1306_Error_t ssd1306_FillBuffer(uint8_t* buf, uint32_t len) {
     SSD1306_Error_t ret = SSD1306_ERR;
     if (len <= SSD1306_BUFFER_SIZE) {
-        memcpy(SSD1306_Buffer,buf,len);
+        memcpy(SSD1306_Buffer, buf, len);
+        ssd1306_MarkDirty(0, len - 1);
         ret = SSD1306_OK;
     }
     return ret;
 }
 
-/* Initialize the oled screen */
+/* initialize the oled screen */
 SSD1306_Error_t ssd1306_Init(void) {
-    // Reset OLED
+    // reset oled
     ssd1306_Reset();
 
-    // Wait for the screen to boot
+    // wait for the screen to boot
     HAL_Delay(100);
 
-    // Check I2C communication
-    if (HAL_I2C_IsDeviceReady(&SSD1306_I2C_PORT, SSD1306_I2C_ADDR, 3, 100) != HAL_OK) {
-        return SSD1306_ERR;
-    }
+    // check i2c communication
+    #ifdef SSD1306_USE_I2C
+        if (HAL_I2C_IsDeviceReady(&SSD1306_I2C_PORT, SSD1306_I2C_ADDR, 3, 100) != HAL_OK) {
+            return SSD1306_ERR;
+        }
+    #endif
 
-    // Init OLED
-    ssd1306_SetDisplayOn(0); //display off
+    // init oled
+    ssd1306_SetDisplayOn(0); // display off
 
-    ssd1306_WriteCommand(0x20); //Set Memory Addressing Mode
-    ssd1306_WriteCommand(0x00); // 00b,Horizontal Addressing Mode
+    ssd1306_WriteCommand(0x20); // set memory addressing mode
+    ssd1306_WriteCommand(0x00); // 00b, horizontal addressing mode
 
-    ssd1306_WriteCommand(0xB0); //Set Page Start Address for Page Addressing Mode,0-7
+    ssd1306_WriteCommand(0xB0); // set page start address for page addressing mode, 0-7
 
 #ifdef SSD1306_MIRROR_VERT
-    ssd1306_WriteCommand(0xC0); // Mirror vertically
+    ssd1306_WriteCommand(0xC0); // mirror vertically
 #else
-    ssd1306_WriteCommand(0xC8); //Set COM Output Scan Direction
+    ssd1306_WriteCommand(0xC8); // set com output scan direction
 #endif
 
-    ssd1306_WriteCommand(0x00); //---set low column address
-    ssd1306_WriteCommand(0x10); //---set high column address
+    ssd1306_WriteCommand(0x00); // set low column address
+    ssd1306_WriteCommand(0x10); // set high column address
 
-    ssd1306_WriteCommand(0x40); //--set start line address
+    ssd1306_WriteCommand(0x40); // set start line address
 
     ssd1306_SetContrast(0xFF);
 
 #ifdef SSD1306_MIRROR_HORIZ
-    ssd1306_WriteCommand(0xA0); // Mirror horizontally
+    ssd1306_WriteCommand(0xA0); // mirror horizontally
 #else
-    ssd1306_WriteCommand(0xA1); //--set segment re-map 0 to 127
+    ssd1306_WriteCommand(0xA1); // set segment re-map 0 to 127
 #endif
 
 #ifdef SSD1306_INVERSE_COLOR
-    ssd1306_WriteCommand(0xA7); //--set inverse color
+    ssd1306_WriteCommand(0xA7); // set inverse color
 #else
-    ssd1306_WriteCommand(0xA6); //--set normal color
+    ssd1306_WriteCommand(0xA6); // set normal color
 #endif
 
-// Set multiplex ratio.
-#if (SSD1306_HEIGHT == 128)
-    ssd1306_WriteCommand(0xFF);
-#else
-    ssd1306_WriteCommand(0xA8); //--set multiplex ratio(1 to 64)
+/* set multiplex ratio (command 0xA8 then value = SSD1306_HEIGHT - 1) */
+ssd1306_WriteCommand(0xA8);
+ssd1306_WriteCommand((uint8_t)(SSD1306_HEIGHT - 1));
+/* optionally keep compile-time check that SSD1306_HEIGHT is supported */
+#if !(SSD1306_HEIGHT == 32 || SSD1306_HEIGHT == 64 || SSD1306_HEIGHT == 128)
+#error "only 32, 64, or 128 lines of height are supported!"
 #endif
 
-#if (SSD1306_HEIGHT == 32)
-    ssd1306_WriteCommand(0x1F);
-#elif (SSD1306_HEIGHT == 64)
-    ssd1306_WriteCommand(0x3F);
-#elif (SSD1306_HEIGHT == 128)
-    ssd1306_WriteCommand(0x3F);
-#else
-#error "Only 32, 64, or 128 lines of height are supported!"
-#endif
+    ssd1306_WriteCommand(0xA4); // 0xa4, output follows ram content
 
-    ssd1306_WriteCommand(0xA4); //0xa4,Output follows RAM content
+    ssd1306_WriteCommand(0xD3); // set display offset
+    ssd1306_WriteCommand(0x00); // not offset
 
-    ssd1306_WriteCommand(0xD3); //-set display offset
-    ssd1306_WriteCommand(0x00); //-not offset
+    ssd1306_WriteCommand(0xD5); // set display clock divide ratio/oscillator frequency
+    ssd1306_WriteCommand(0xF0); // set divide ratio
 
-    ssd1306_WriteCommand(0xD5); //--set display clock divide ratio/oscillator frequency
-    ssd1306_WriteCommand(0xF0); //--set divide ratio
-
-    ssd1306_WriteCommand(0xD9); //--set pre-charge period
+    ssd1306_WriteCommand(0xD9); // set pre-charge period
     ssd1306_WriteCommand(0x22);
 
-    ssd1306_WriteCommand(0xDA); //--set com pins hardware configuration
+    ssd1306_WriteCommand(0xDA); // set com pins hardware configuration
 #if (SSD1306_HEIGHT == 32)
     ssd1306_WriteCommand(0x02);
 #elif (SSD1306_HEIGHT == 64)
@@ -152,97 +209,116 @@ SSD1306_Error_t ssd1306_Init(void) {
 #elif (SSD1306_HEIGHT == 128)
     ssd1306_WriteCommand(0x12);
 #else
-#error "Only 32, 64, or 128 lines of height are supported!"
+#error "only 32, 64, or 128 lines of height are supported!"
 #endif
 
-    ssd1306_WriteCommand(0xDB); //--set vcomh
-    ssd1306_WriteCommand(0x20); //0x20,0.77xVcc
+    ssd1306_WriteCommand(0xDB); // set vcomh
+    ssd1306_WriteCommand(0x20); // 0x20, 0.77xVcc
 
-    ssd1306_WriteCommand(0x8D); //--set DC-DC enable
+    ssd1306_WriteCommand(0x8D); // set dc-dc enable
     ssd1306_WriteCommand(0x14);
-    ssd1306_SetDisplayOn(1); //--turn on SSD1306 panel
+    ssd1306_SetDisplayOn(1); // turn on SSD1306 panel
 
-    // Clear screen
+    // clear screen
     ssd1306_Fill(Black);
     
-    // Flush buffer to screen
+    // flush buffer to screen
     ssd1306_UpdateScreen();
     
-    // Set default values for screen object
+    // set default values for screen object
     SSD1306.CurrentX = 0;
     SSD1306.CurrentY = 0;
-    
     SSD1306.Initialized = 1;
+    SSD1306.Dirty = 0;
+    SSD1306.DirtyStart = 0xFFFF;
+    SSD1306.DirtyEnd = 0;
+    
+    // reset update position
+    ssd1306UpdatePosition = 0;
+    ssd1306UpdatePage = 0;
+    ssd1306CursorX = 0;
+    ssd1306DirtyFlag = 0;
     
     return SSD1306_OK;
 }
 
-/* Fill the whole screen with the given color */
+/* fill the whole screen with the given color */
 void ssd1306_Fill(SSD1306_COLOR color) {
     memset(SSD1306_Buffer, (color == Black) ? 0x00 : 0xFF, sizeof(SSD1306_Buffer));
+    ssd1306_MarkDirty(0, SSD1306_BUFFER_SIZE - 1);
 }
 
-/* Write the screenbuffer with changed to the screen */
+/* write the screenbuffer with changed to the screen */
 void ssd1306_UpdateScreen(void) {
-    // Write data to each page of RAM. Number of pages
+    // write data to each page of ram. number of pages
     // depends on the screen height:
     //
     //  * 32px   ==  4 pages
     //  * 64px   ==  8 pages
     //  * 128px  ==  16 pages
     for(uint8_t i = 0; i < SSD1306_HEIGHT/8; i++) {
-        ssd1306_WriteCommand(0xB0 + i); // Set the current RAM page address.
+        ssd1306_WriteCommand(0xB0 + i); // set the current ram page address.
         ssd1306_WriteCommand(0x00 + SSD1306_X_OFFSET_LOWER);
         ssd1306_WriteCommand(0x10 + SSD1306_X_OFFSET_UPPER);
         
-        ssd1306_WriteData(&SSD1306_Buffer[SSD1306_WIDTH*i],SSD1306_WIDTH);
+        ssd1306_WriteData(&SSD1306_Buffer[SSD1306_WIDTH*i], SSD1306_WIDTH);
     }
 }
 
 /*
- * Draw one pixel in the screenbuffer
- * X => X Coordinate
- * Y => Y Coordinate
- * color => Pixel color
+ * draw one pixel in the screenbuffer
+ * x => x coordinate
+ * y => y coordinate
+ * color => pixel color
  */
 void ssd1306_DrawPixel(uint8_t x, uint8_t y, SSD1306_COLOR color) {
     if(x >= SSD1306_WIDTH || y >= SSD1306_HEIGHT) {
-        // Don't write outside the buffer
+        // don't write outside the buffer
         return;
     }
-   
-    // Draw in the right color
+    
+    uint16_t pos = x + (y / 8) * SSD1306_WIDTH;
+    
+    // mark region as dirty
+    ssd1306_MarkDirty(pos, pos);
+    
+    // draw in the right color
     if(color == White) {
-        SSD1306_Buffer[x + (y / 8) * SSD1306_WIDTH] |= 1 << (y % 8);
+        SSD1306_Buffer[pos] |= 1 << (y % 8);
     } else { 
-        SSD1306_Buffer[x + (y / 8) * SSD1306_WIDTH] &= ~(1 << (y % 8));
+        SSD1306_Buffer[pos] &= ~(1 << (y % 8));
     }
 }
 
 /*
- * Draw 1 char to the screen buffer
- * ch       => char om weg te schrijven
- * Font     => Font waarmee we gaan schrijven
- * color    => Black or White
+ * draw 1 char to the screen buffer
+ * ch       => char to write
+ * font     => font to use
+ * color    => black or white
  */
 char ssd1306_WriteChar(char ch, SSD1306_Font_t Font, SSD1306_COLOR color) {
     uint32_t i, b, j;
     
-    // Check if character is valid
+    // check if character is valid
     if (ch < 32 || ch > 126)
         return 0;
     
-    // Char width is not equal to font width for proportional font
+    // char width is not equal to font width for proportional font
     const uint8_t char_width = Font.char_width ? Font.char_width[ch-32] : Font.width;
-    // Check remaining space on current line
+    // check remaining space on current line
     if (SSD1306_WIDTH < (SSD1306.CurrentX + char_width) ||
         SSD1306_HEIGHT < (SSD1306.CurrentY + Font.height))
     {
-        // Not enough space on current line
+        // not enough space on current line
         return 0;
     }
     
-    // Use the font to write
+    // mark region as dirty
+    uint16_t start_pos = SSD1306.CurrentX + (SSD1306.CurrentY / 8) * SSD1306_WIDTH;
+    uint16_t end_pos = SSD1306.CurrentX + char_width + ((SSD1306.CurrentY + Font.height) / 8) * SSD1306_WIDTH;
+    ssd1306_MarkDirty(start_pos, end_pos);
+    
+    // use the font to write
     for(i = 0; i < Font.height; i++) {
         b = Font.data[(ch - 32) * Font.height + i];
         for(j = 0; j < char_width; j++) {
@@ -254,34 +330,34 @@ char ssd1306_WriteChar(char ch, SSD1306_Font_t Font, SSD1306_COLOR color) {
         }
     }
     
-    // The current space is now taken
+    // the current space is now taken
     SSD1306.CurrentX += char_width;
     
-    // Return written char for validation
+    // return written char for validation
     return ch;
 }
 
-/* Write full string to screenbuffer */
+/* write full string to screenbuffer */
 char ssd1306_WriteString(char* str, SSD1306_Font_t Font, SSD1306_COLOR color) {
     while (*str) {
         if (ssd1306_WriteChar(*str, Font, color) != *str) {
-            // Char could not be written
+            // char could not be written
             return *str;
         }
         str++;
     }
     
-    // Everything ok
+    // everything ok
     return *str;
 }
 
-/* Position the cursor */
+/* position the cursor */
 void ssd1306_SetCursor(uint8_t x, uint8_t y) {
     SSD1306.CurrentX = x;
     SSD1306.CurrentY = y;
 }
 
-/* Draw line by Bresenhem's algorithm */
+/* draw line by bresenham's algorithm */
 void ssd1306_Line(uint8_t x1, uint8_t y1, uint8_t x2, uint8_t y2, SSD1306_COLOR color) {
     int32_t deltaX = abs(x2 - x1);
     int32_t deltaY = abs(y2 - y1);
@@ -308,7 +384,7 @@ void ssd1306_Line(uint8_t x1, uint8_t y1, uint8_t x2, uint8_t y2, SSD1306_COLOR 
     return;
 }
 
-/* Draw polyline */
+/* draw polyline */
 void ssd1306_Polyline(const SSD1306_VERTEX *par_vertex, uint16_t par_size, SSD1306_COLOR color) {
     uint16_t i;
     if(par_vertex == NULL) {
@@ -322,12 +398,12 @@ void ssd1306_Polyline(const SSD1306_VERTEX *par_vertex, uint16_t par_size, SSD13
     return;
 }
 
-/* Convert Degrees to Radians */
+/* convert degrees to radians */
 static float ssd1306_DegToRad(float par_deg) {
     return par_deg * (3.14159f / 180.0f);
 }
 
-/* Normalize degree to [0;360] */
+/* normalize degree to [0;360] */
 static uint16_t ssd1306_NormalizeTo0_360(uint16_t par_deg) {
     uint16_t loc_angle;
     if(par_deg <= 360) {
@@ -340,7 +416,7 @@ static uint16_t ssd1306_NormalizeTo0_360(uint16_t par_deg) {
 }
 
 /*
- * DrawArc. Draw angle is beginning from 4 quart of trigonometric circle (3pi/2)
+ * drawarc. draw angle is beginning from 4 quart of trigonometric circle (3pi/2)
  * start_angle in degree
  * sweep in degree
  */
@@ -379,8 +455,8 @@ void ssd1306_DrawArc(uint8_t x, uint8_t y, uint8_t radius, uint16_t start_angle,
 }
 
 /*
- * Draw arc with radius line
- * Angle is beginning from 4 quart of trigonometric circle (3pi/2)
+ * draw arc with radius line
+ * angle is beginning from 4 quart of trigonometric circle (3pi/2)
  * start_angle: start angle in degree
  * sweep: finish angle in degree
  */
@@ -420,13 +496,13 @@ void ssd1306_DrawArcWithRadiusLine(uint8_t x, uint8_t y, uint8_t radius, uint16_
         ssd1306_Line(xp1,yp1,xp2,yp2,color);
     }
     
-    // Radius line
+    // radius line
     ssd1306_Line(x,y,first_point_x,first_point_y,color);
     ssd1306_Line(x,y,xp2,yp2,color);
     return;
 }
 
-/* Draw circle by Bresenhem's algorithm */
+/* draw circle by bresenham's algorithm */
 void ssd1306_DrawCircle(uint8_t par_x,uint8_t par_y,uint8_t par_r,SSD1306_COLOR par_color) {
     int32_t x = -par_r;
     int32_t y = 0;
@@ -461,7 +537,7 @@ void ssd1306_DrawCircle(uint8_t par_x,uint8_t par_y,uint8_t par_r,SSD1306_COLOR 
     return;
 }
 
-/* Draw filled circle. Pixel positions calculated using Bresenham's algorithm */
+/* draw filled circle. pixel positions calculated using bresenham's algorithm */
 void ssd1306_FillCircle(uint8_t par_x,uint8_t par_y,uint8_t par_r,SSD1306_COLOR par_color) {
     int32_t x = -par_r;
     int32_t y = 0;
@@ -473,9 +549,16 @@ void ssd1306_FillCircle(uint8_t par_x,uint8_t par_y,uint8_t par_r,SSD1306_COLOR 
     }
 
     do {
-        for (uint8_t _y = (par_y + y); _y >= (par_y - y); _y--) {
-            for (uint8_t _x = (par_x - x); _x >= (par_x + x); _x--) {
-                ssd1306_DrawPixel(_x, _y, par_color);
+        int16_t y0 = par_y - y;
+        int16_t y1 = par_y + y;
+        int16_t x0 = par_x - x;
+        int16_t x1 = par_x + x;
+
+        for (int16_t yy = y0; yy <= y1; yy++) {
+            if (yy < 0 || yy >= SSD1306_HEIGHT) continue;
+            for (int16_t xx = x0; xx <= x1; xx++) {
+                if (xx < 0 || xx >= SSD1306_WIDTH) continue;
+                ssd1306_DrawPixel((uint8_t)xx, (uint8_t)yy, par_color);
             }
         }
 
@@ -493,11 +576,10 @@ void ssd1306_FillCircle(uint8_t par_x,uint8_t par_y,uint8_t par_r,SSD1306_COLOR 
             err = err + (x * 2 + 1);
         }
     } while (x <= 0);
-
-    return;
 }
 
-/* Draw a rectangle */
+
+/* draw a rectangle */
 void ssd1306_DrawRectangle(uint8_t x1, uint8_t y1, uint8_t x2, uint8_t y2, SSD1306_COLOR color) {
     ssd1306_Line(x1,y1,x2,y1,color);
     ssd1306_Line(x2,y1,x2,y2,color);
@@ -507,7 +589,7 @@ void ssd1306_DrawRectangle(uint8_t x1, uint8_t y1, uint8_t x2, uint8_t y2, SSD13
     return;
 }
 
-/* Draw a filled rectangle */
+/* draw a filled rectangle */
 void ssd1306_FillRectangle(uint8_t x1, uint8_t y1, uint8_t x2, uint8_t y2, SSD1306_COLOR color) {
     uint8_t x_start = ((x1<=x2) ? x1 : x2);
     uint8_t x_end   = ((x1<=x2) ? x2 : x1);
@@ -530,6 +612,12 @@ SSD1306_Error_t ssd1306_InvertRectangle(uint8_t x1, uint8_t y1, uint8_t x2, uint
     return SSD1306_ERR;
   }
   uint32_t i;
+  
+  // mark region as dirty
+  uint16_t start_pos = x1 + (y1 / 8) * SSD1306_WIDTH;
+  uint16_t end_pos = x2 + (y2 / 8) * SSD1306_WIDTH;
+  ssd1306_MarkDirty(start_pos, end_pos);
+  
   if ((y1 / 8) != (y2 / 8)) {
     /* if rectangle doesn't lie on one 8px row */
     for (uint32_t x = x1; x <= x2; x++) {
@@ -552,14 +640,19 @@ SSD1306_Error_t ssd1306_InvertRectangle(uint8_t x1, uint8_t y1, uint8_t x2, uint
   return SSD1306_OK;
 }
 
-/* Draw a bitmap */
+/* draw a bitmap */
 void ssd1306_DrawBitmap(uint8_t x, uint8_t y, const unsigned char* bitmap, uint8_t w, uint8_t h, SSD1306_COLOR color) {
-    int16_t byteWidth = (w + 7) / 8; // Bitmap scanline pad = whole byte
+    int16_t byteWidth = (w + 7) / 8; // bitmap scanline pad = whole byte
     uint8_t byte = 0;
 
     if (x >= SSD1306_WIDTH || y >= SSD1306_HEIGHT) {
         return;
     }
+    
+    // mark region as dirty
+    uint16_t start_pos = x + (y / 8) * SSD1306_WIDTH;
+    uint16_t end_pos = x + w + ((y + h) / 8) * SSD1306_WIDTH;
+    ssd1306_MarkDirty(start_pos, end_pos);
 
     for (uint8_t j = 0; j < h; j++, y++) {
         for (uint8_t i = 0; i < w; i++) {
@@ -586,10 +679,10 @@ void ssd1306_SetContrast(const uint8_t value) {
 void ssd1306_SetDisplayOn(const uint8_t on) {
     uint8_t value;
     if (on) {
-        value = 0xAF;   // Display on
+        value = 0xAF;   // display on
         SSD1306.DisplayOn = 1;
     } else {
-        value = 0xAE;   // Display off
+        value = 0xAE;   // display off
         SSD1306.DisplayOn = 0;
     }
     ssd1306_WriteCommand(value);
@@ -599,74 +692,78 @@ uint8_t ssd1306_GetDisplayOn() {
     return SSD1306.DisplayOn;
 }
 
-// --------------------------------------------------------------
-// --------------------------------------------------------------
-// --------------------------------------------------------------
+/* -------------------------------------------------------------- */
+/* -------------------------------------------------------------- */
+/* -------------------------------------------------------------- */
 
 /* ensure x offset macro exists */
 #ifndef SSD1306_X_OFFSET
 #define SSD1306_X_OFFSET 0
 #endif
 
-/* external state for incremental update visible to other translation units */
-volatile uint16_t ssd1306UpdatePosition = 0; /* byte offset in buffer */
-volatile uint8_t  ssd1306UpdatePage     = 0; /* current page index */
-volatile uint8_t  ssd1306CursorX        = 0; /* x position inside page */
-
-/* number of bytes to send in one update call */
-#ifndef SSD1306_UPDATE_CHUNK_SIZE
-#define SSD1306_UPDATE_CHUNK_SIZE 32U
-#endif
-
 void ssd1306_UpdateScreenChunk(void)
 {
+    static uint8_t last_page = 0xFF;
+    static uint16_t last_col = 0xFFFF;
+    
     const uint16_t totalSize = (uint16_t)(SSD1306_WIDTH * (SSD1306_HEIGHT / 8U));
     uint16_t bytesToSend;
     uint8_t page;
-    uint8_t x;
+    uint16_t col;
     uint16_t remainingInPage;
-    uint16_t effectivePos;
 
     /* normalize position if out of bounds */
     if (ssd1306UpdatePosition >= totalSize) {
         ssd1306UpdatePosition = 0;
+        ssd1306UpdatePage = 0;
+        ssd1306CursorX = 0;
     }
 
-    effectivePos = ssd1306UpdatePosition;
-
     /* calculate current page and x position from linear byte offset */
-    page = (uint8_t)(effectivePos / SSD1306_WIDTH);
-    x    = (uint8_t)(effectivePos % SSD1306_WIDTH);
-
+    page = (uint8_t)(ssd1306UpdatePosition / SSD1306_WIDTH);
+    ssd1306CursorX = (uint8_t)(ssd1306UpdatePosition % SSD1306_WIDTH);
     ssd1306UpdatePage = page;
-    ssd1306CursorX    = x;
-
-    /* set page and column address in page addressing mode */
-    ssd1306_WriteCommand((uint8_t)(0xB0 + page));
 
     /* compute column start = x + X_OFFSET */
-    uint16_t col = (uint16_t)x + (uint16_t)SSD1306_X_OFFSET;
-    /* lower nibble */
-    ssd1306_WriteCommand((uint8_t)(0x00 + (col & 0x0F)));
-    /* upper nibble (4..7 bits) */
-    ssd1306_WriteCommand((uint8_t)(0x10 + ((col >> 4) & 0x0F)));
+    col = (uint16_t)ssd1306CursorX + (uint16_t)SSD1306_X_OFFSET;
+
+    /* only send page/column commands if they changed */
+    if (last_page != page || last_col != col) {
+        ssd1306_WriteCommand((uint8_t)(0xB0 + page));
+        ssd1306_WriteCommand((uint8_t)(0x00 + (col & 0x0F)));
+        ssd1306_WriteCommand((uint8_t)(0x10 + ((col >> 4) & 0x0F)));
+        
+        last_page = page;
+        last_col = col;
+    }
 
     /* limit transfer to remaining bytes in the current page row */
-    remainingInPage = (uint16_t)SSD1306_WIDTH - (uint16_t)x;
-
+    remainingInPage = (uint16_t)SSD1306_WIDTH - (uint16_t)ssd1306CursorX;
     bytesToSend = (uint16_t)SSD1306_UPDATE_CHUNK_SIZE;
+    
     if (bytesToSend > remainingInPage) {
         bytesToSend = remainingInPage;
     }
-
-    if ((uint32_t)effectivePos + bytesToSend > totalSize) {
-        bytesToSend = (uint16_t)(totalSize - effectivePos);
+    if ((uint32_t)ssd1306UpdatePosition + bytesToSend > totalSize) {
+        bytesToSend = (uint16_t)(totalSize - ssd1306UpdatePosition);
     }
 
     /* send the data chunk (single page boundary guaranteed) */
     if (bytesToSend > 0) {
-        ssd1306_WriteData(&SSD1306_Buffer[effectivePos], bytesToSend);
-        ssd1306UpdatePosition = (uint16_t)(effectivePos + bytesToSend);
+#ifdef SSD1306_USE_DMA
+        ssd1306_WriteData_DMA(&SSD1306_Buffer[ssd1306UpdatePosition], bytesToSend);
+#else
+        ssd1306_WriteData(&SSD1306_Buffer[ssd1306UpdatePosition], bytesToSend);
+#endif
+        ssd1306UpdatePosition = (uint16_t)(ssd1306UpdatePosition + bytesToSend);
+        ssd1306CursorX += bytesToSend;
+    }
+
+    /* move to next page if we reached the end of current page */
+    if (ssd1306CursorX >= SSD1306_WIDTH) {
+        ssd1306CursorX = 0;
+        ssd1306UpdatePage++;
+        last_col = 0xFFFF; // force column command on next page
     }
 
     /* reset after full frame */
@@ -674,5 +771,74 @@ void ssd1306_UpdateScreenChunk(void)
         ssd1306UpdatePosition = 0;
         ssd1306UpdatePage = 0;
         ssd1306CursorX = 0;
+        last_page = 0xFF;
+        last_col = 0xFFFF;
+    }
+}
+
+void ssd1306_UpdateDirtyChunk(void)
+{
+    static uint16_t dirty_update_pos = 0;
+    
+    if (!SSD1306.Dirty) {
+        dirty_update_pos = 0;
+        ssd1306DirtyFlag = 0;
+        return;
+    }
+
+    const uint16_t totalSize = (uint16_t)(SSD1306_WIDTH * (SSD1306_HEIGHT / 8U));
+    uint16_t bytesToSend;
+    uint8_t page;
+    uint16_t col;
+
+    /* start from beginning of dirty region if not already updating */
+    if (dirty_update_pos < SSD1306.DirtyStart) {
+        dirty_update_pos = SSD1306.DirtyStart;
+    }
+
+    /* check if we've passed the dirty region */
+    if (dirty_update_pos > SSD1306.DirtyEnd) {
+        SSD1306.Dirty = 0;
+        SSD1306.DirtyStart = 0xFFFF;
+        SSD1306.DirtyEnd = 0;
+        dirty_update_pos = 0;
+        ssd1306DirtyFlag = 0;
+        return;
+    }
+
+    /* calculate current page and column */
+    page = (uint8_t)(dirty_update_pos / SSD1306_WIDTH);
+    col = (uint8_t)(dirty_update_pos % SSD1306_WIDTH) + SSD1306_X_OFFSET;
+
+    /* set display position */
+    ssd1306_WriteCommand((uint8_t)(0xB0 + page));
+    ssd1306_WriteCommand((uint8_t)(0x00 + (col & 0x0F)));
+    ssd1306_WriteCommand((uint8_t)(0x10 + ((col >> 4) & 0x0F)));
+
+    /* calculate bytes to send (respect chunk size and dirty region end) */
+    bytesToSend = SSD1306_UPDATE_CHUNK_SIZE;
+    if (dirty_update_pos + bytesToSend > SSD1306.DirtyEnd + 1) {
+        bytesToSend = SSD1306.DirtyEnd + 1 - dirty_update_pos;
+    }
+
+    /* don't cross page boundary */
+    uint16_t remainingInPage = SSD1306_WIDTH - (dirty_update_pos % SSD1306_WIDTH);
+    if (bytesToSend > remainingInPage) {
+        bytesToSend = remainingInPage;
+    }
+
+    /* send data */
+    if (bytesToSend > 0) {
+#ifdef SSD1306_USE_DMA
+        ssd1306_WriteData_DMA(&SSD1306_Buffer[dirty_update_pos], bytesToSend);
+#else
+        ssd1306_WriteData(&SSD1306_Buffer[dirty_update_pos], bytesToSend);
+#endif
+        dirty_update_pos += bytesToSend;
+    }
+
+    /* if we reached end of page, move to next page start */
+    if (dirty_update_pos % SSD1306_WIDTH == 0) {
+        dirty_update_pos = (dirty_update_pos / SSD1306_WIDTH) * SSD1306_WIDTH;
     }
 }

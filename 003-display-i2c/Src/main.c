@@ -1,3 +1,4 @@
+
 /* USER CODE BEGIN Header */
 /**
   ******************************************************************************
@@ -36,7 +37,7 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-/* LED toggle interval (500 ms ON, 500 ms OFF) and Redraw buffer every 500 ms */
+/* LED toggle interval (500 ms ON, 500 ms OFF) and redraw buffer every 500 ms */
 #define UPDATE_DELAY_MS 500
 
 /* USER CODE END PD */
@@ -98,16 +99,16 @@ int main(void)
   /* USER CODE BEGIN 2 */
   MX_I2C1_Init();
 
-  /* Initialize OLED display */
+  /* initialize oled display */
   if (ssd1306_Init() != SSD1306_OK) {
-      /* If OLED init fails, blink PC13 rapidly */
+      /* if oled init fails, blink pc13 rapidly */
       while(1) {
           HAL_GPIO_TogglePin(GPIOC, GPIO_PIN_13);
           HAL_Delay(100);
       }
   }
 
-  /* Clear screen */
+  /* clear screen */
   ssd1306_Fill(Black);
   ssd1306_UpdateScreen();
 
@@ -123,6 +124,22 @@ int main(void)
   uint8_t led_state = 0;  /* 0 = OFF, 1 = ON */
   char buffer[32];
 
+  /* draw static elements once */
+  ssd1306_DrawRectangle(0, 0, SSD1306_WIDTH-1, SSD1306_HEIGHT-1, White);
+  ssd1306_SetCursor(4, 10);
+  ssd1306_WriteString("Test", Font_7x10, White);
+  ssd1306_SetCursor(40, 2);
+  ssd1306_WriteString("SSD1306", Font_11x18, White);
+  
+  /* draw initial dynamic content */
+  snprintf(buffer, sizeof(buffer), "LED:%s", led_state ? "ON " : "OFF");
+  ssd1306_SetCursor(4, 20);
+  ssd1306_WriteString(buffer, Font_6x8, White);
+  
+  snprintf(buffer, sizeof(buffer), "UPS:%lu", (unsigned long)ups_value);
+  ssd1306_SetCursor(4, 30);
+  ssd1306_WriteString(buffer, Font_6x8, White);
+
   while (1)
   {
     /* USER CODE END WHILE */
@@ -131,50 +148,45 @@ int main(void)
 
     uint32_t now = HAL_GetTick();
 
-
-    /* Toggle LED every UPDATE_DELAY_MS */
-    /* Redraw buffer every UPDATE_DELAY_MS */
-
+    /* toggle led every UPDATE_DELAY_MS and update display content */
     if ((now - lastUpdate) >= UPDATE_DELAY_MS)
     {
       lastUpdate = now;
 
-      // Toggle LED
+      // toggle led
       HAL_GPIO_TogglePin(GPIOC, GPIO_PIN_13);
 
-        /* Update state (inverted logic: RESET = ON, SET = OFF) */
-        led_state = (HAL_GPIO_ReadPin(GPIOC, GPIO_PIN_13) == GPIO_PIN_RESET) ? 1 : 0;
+      /* update state (inverted logic: RESET = ON, SET = OFF) */
+      led_state = (HAL_GPIO_ReadPin(GPIOC, GPIO_PIN_13) == GPIO_PIN_RESET) ? 1 : 0;
 
-      //
-
-      ssd1306_Fill(Black);
-
-      /* Draw border */
-      ssd1306_DrawRectangle(0, 0, SSD1306_WIDTH-1, SSD1306_HEIGHT-1, White);
-
-      /* Display title */
-      ssd1306_SetCursor(4, 10);
-      ssd1306_WriteString("Test", Font_7x10, White);
-      ssd1306_SetCursor(40, 2);
-      ssd1306_WriteString("SSD1306", Font_11x18, White);
-
-      /* Display LED status */
+      /* update only changing parts of the display */
+      /* clear previous text areas */
+      // ssd1306_FillRectangle(4, 20, 4 + 6*8, 20 + 8, Black);
+      // ssd1306_FillRectangle(4, 30, 4 + 6*8, 30 + 8, Black);
+      
+      /* draw updated text */
       snprintf(buffer, sizeof(buffer), "LED:%s", led_state ? "ON " : "OFF");
       ssd1306_SetCursor(4, 20);
       ssd1306_WriteString(buffer, Font_6x8, White);
 
-      /* Display UPS */
       snprintf(buffer, sizeof(buffer), "UPS:%lu", (unsigned long)ups_value);
       ssd1306_SetCursor(4, 30);
       ssd1306_WriteString(buffer, Font_6x8, White);
     }
 
-    /* Send chunk to screen every iteration */
-    ssd1306_UpdateScreenChunk();
-    
+/* send chunk to screen every iteration using dirty updates */
+if (ssd1306DirtyFlag) {
+    /* update only the changed parts of the screen */
+    ssd1306_UpdateDirtyChunk();
+} else {
+    /* no changes detected - skip update to maximize performance */
+    /* note: with UpdateScreenChunk() enabled, UPS is 1000 */
+    /* note: with UpdateScreenChunk() commented, UPS is 290000 */
+    // ssd1306_UpdateScreenChunk();
+}
     screen_update_counter++;
 
-    /* Calculate UPS every second */
+    /* calculate ups every second */
     if ((now - last_ups_calc) >= 1000)
     {
       ups_value = screen_update_counter;
@@ -229,6 +241,14 @@ void SystemClock_Config(void)
 
 /* USER CODE BEGIN 4 */
 
+#ifdef SSD1306_USE_DMA
+/* i2c dma transfer complete callback */
+void HAL_I2C_MemTxCpltCallback(I2C_HandleTypeDef *hi2c) {
+    /* this function is called automatically by hal when dma transfer completes */
+    /* no action needed here, but function must exist */
+    (void)hi2c;
+}
+#endif
 
 /* USER CODE END 4 */
 

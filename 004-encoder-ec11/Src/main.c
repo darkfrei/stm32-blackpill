@@ -21,8 +21,8 @@
 /* USER CODE BEGIN Includes */
 #include <stdio.h>
 #include <string.h>
-#include "ssd1306.h"
-#include "ssd1306_fonts.h"
+#include "sh1106.h"           // ← исправлено: строчные буквы
+#include "sh1106_fonts.h"     // ← исправлено: строчные буквы
 #include "encoder_EC11.h"
 /* USER CODE END Includes */
 
@@ -99,11 +99,12 @@ int main(void)
   MX_I2C1_Init();
   MX_TIM2_Init();
   /* USER CODE BEGIN 2 */
+  
   /* small delay for power and display startup */
   HAL_Delay(50);
 
   /* initialize oled */
-  if (ssd1306_Init() != SSD1306_OK) {
+  if (SH1106_Init() != SH1106_OK) {  // ← исправлено: используем SH1106_OK
       /* blink led forever on oled init failure */
       while (1) {
           LED_TOGGLE();
@@ -111,11 +112,11 @@ int main(void)
       }
   }
 
-  ssd1306_Fill(Black);
-  ssd1306_UpdateScreen();
+  SH1106_Fill(SH1106_COLOR_BLACK);
+  SH1106_UpdateScreen();
 
   /* initialize encoder driver */
-  EC11_Init(&encoder);  // Исправлено: убран второй параметр
+  EC11_Init(&encoder);
 
   /* start encoder timer */
   HAL_TIM_Encoder_Start(&htim2, TIM_CHANNEL_ALL);
@@ -126,6 +127,7 @@ int main(void)
 
   /* draw static display layout */
   Display_Init();
+  
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -157,7 +159,7 @@ int main(void)
         ENC_RESET();
 
         /* reset driver's internal timer baseline */
-        encoder.lastTimerValue = 0;  // Сброс внутреннего значения таймера
+        encoder.lastTimerValue = 0;
 
         display_dirty = 1;
     }
@@ -179,10 +181,6 @@ int main(void)
         display_dirty = 1;
     }
 
-    /* non-blocking screen update if supported */
-    // Убедитесь, что ssd1306DirtyFlag объявлен в вашей библиотеке SSD1306
-    // Если нет, используйте прямой вызов:
-    // ssd1306_UpdateScreen();
     /* USER CODE END 3 */
   }
 }
@@ -229,30 +227,22 @@ void SystemClock_Config(void)
 }
 
 /* USER CODE BEGIN 4 */
+
 /**
   * @brief initialize static display content
   */
 void Display_Init(void)
 {
-    ssd1306_Fill(Black);
-    ssd1306_DrawRectangle(0, 0, 127, 63, White);
+    SH1106_Fill(SH1106_COLOR_BLACK);
+    SH1106_DrawRectangle(0, 0, 127, 63, SH1106_COLOR_WHITE);
 
-    ssd1306_SetCursor(20, 2);
-    ssd1306_WriteString("EC11 Encoder", Font_6x8, White);
+    SH1106_WriteStringAt(20, 2, "EC11 Encoder", Font_8H, SH1106_COLOR_WHITE);
+    SH1106_WriteStringAt(4, 22, "Step:", Font_8H, SH1106_COLOR_WHITE);
+    SH1106_WriteStringAt(4, 32, "Dir:", Font_8H, SH1106_COLOR_WHITE);
+    SH1106_WriteStringAt(4, 42, "Button:", Font_8H, SH1106_COLOR_WHITE);
+    SH1106_WriteStringAt(4, 52, "UPS:", Font_8H, SH1106_COLOR_WHITE);
 
-    ssd1306_SetCursor(4, 22);
-    ssd1306_WriteString("Step:", Font_6x8, White);
-
-    ssd1306_SetCursor(4, 32);
-    ssd1306_WriteString("Dir:", Font_6x8, White);
-
-    ssd1306_SetCursor(4, 42);
-    ssd1306_WriteString("Button:", Font_6x8, White);
-
-    ssd1306_SetCursor(4, 52);
-    ssd1306_WriteString("UPS:", Font_6x8, White);
-
-    ssd1306_UpdateScreen();
+    SH1106_UpdateScreen();
 }
 
 /**
@@ -260,48 +250,47 @@ void Display_Init(void)
   */
 void Display_Update(void)
 {
+    /* clear dynamic areas to prevent text artifacts */
+    SH1106_FillRectangle(4, 12, 120, 8, SH1106_COLOR_BLACK);   // GPIO line
+    SH1106_FillRectangle(30, 22, 90, 8, SH1106_COLOR_BLACK);   // Step
+    SH1106_FillRectangle(40, 32, 80, 8, SH1106_COLOR_BLACK);   // Direction
+    SH1106_FillRectangle(50, 42, 70, 8, SH1106_COLOR_BLACK);   // Button
+    SH1106_FillRectangle(40, 52, 80, 8, SH1106_COLOR_BLACK);   // UPS
+    
     /* gpio diagnostic (encoder input states) */
     uint8_t pa0 = HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_0);
     uint8_t pa1 = HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_1);
     snprintf(display_buf, sizeof(display_buf), "A:%d B:%d", pa0, pa1);
-    ssd1306_SetCursor(4, 12);
-    ssd1306_WriteString(display_buf, Font_6x8, White);
+    SH1106_WriteStringAt(4, 12, display_buf, Font_8H, SH1106_COLOR_WHITE);
 
     /* step counter */
-    snprintf(display_buf, sizeof(display_buf), "%3ld", encoder.step);
-    ssd1306_SetCursor(30, 22);
-    ssd1306_WriteString(display_buf, Font_6x8, White);
+    snprintf(display_buf, sizeof(display_buf), "%ld", encoder.step);
+    SH1106_WriteStringAt(45, 22, display_buf, Font_8H, SH1106_COLOR_WHITE);
 
     /* direction */
     const char *dir_text = "---";
-    if (encoder.dir == EC11_DIR_CW) dir_text = "CW ";
-    else if (encoder.dir == EC11_DIR_CCW) dir_text = "CCW";
-
-    strncpy(temp_buf, dir_text, sizeof(temp_buf) - 1);
-    temp_buf[sizeof(temp_buf) - 1] = '\0';
-    ssd1306_SetCursor(40, 32);
-    ssd1306_WriteString(temp_buf, Font_6x8, White);
+    if (encoder.dir == EC11_DIR_CW) {
+        dir_text = "CW ";
+    } else if (encoder.dir == EC11_DIR_CCW) {
+        dir_text = "CCW";
+    }
+    SH1106_WriteStringAt(40, 32, dir_text, Font_8H, SH1106_COLOR_WHITE);
 
     /* button state */
     const char *btn_text = (encoder.buttonState == 0) ? "PRESSED " : "RELEASED";
-    strncpy(temp_buf, btn_text, sizeof(temp_buf) - 1);
-    temp_buf[sizeof(temp_buf) - 1] = '\0';
-    ssd1306_SetCursor(50, 42);
-    ssd1306_WriteString(temp_buf, Font_6x8, White);
+    SH1106_WriteStringAt(50, 42, btn_text, Font_8H, SH1106_COLOR_WHITE);
 
     /* button press event indicator */
     if (encoder.buttonPressed) {
-        ssd1306_SetCursor(90, 42);
-        ssd1306_WriteString("!", Font_6x8, White);
+        SH1106_WriteStringAt(110, 42, "!", Font_8H, SH1106_COLOR_WHITE);
     }
 
     /* ups */
-    snprintf(display_buf, sizeof(display_buf), "%4lu", ups_value);
-    ssd1306_SetCursor(40, 52);
-    ssd1306_WriteString(display_buf, Font_6x8, White);
+    snprintf(display_buf, sizeof(display_buf), "%lu", ups_value);
+    SH1106_WriteStringAt(40, 52, display_buf, Font_8H, SH1106_COLOR_WHITE);
 
-    // Обновляем экран
-    ssd1306_UpdateScreen();
+    /* update screen */
+    SH1106_UpdateScreen();
 }
 
 /* USER CODE END 4 */
@@ -317,6 +306,7 @@ void Error_Handler(void)
   while (1) { }
   /* USER CODE END Error_Handler_Debug */
 }
+
 #ifdef USE_FULL_ASSERT
 /**
   * @brief  Reports the name of the source file and the source line number

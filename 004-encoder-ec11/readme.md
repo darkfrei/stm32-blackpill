@@ -1,129 +1,199 @@
-# EN11 Encoder on STM32F411 BlackPill with I2C Display
+# Project 4: Rotary Encoder EC11
 
-## Part 1 — STM32CubeMX Setup
+This project demonstrates how to use an EC11 mechanical rotary encoder with an STM32 microcontroller (example: BlackPill STM32F411). The encoder rotation is decoded by a hardware timer in encoder interface mode, the push button is handled via GPIO with software debouncing. An SSD1306 (SH1106) OLED display is used for visualization.
 
-### 1.1 Create a Project
-1. Start STM32CubeMX
-2. File → New Project
-3. Select STM32F411CEU6 (BlackPill)
-4. Click Start Project
+---
 
-### 1.2 Clock Configuration (RCC)
-**Option 1 — External crystal (HSE):**
-- Assign PH0 → RCC_OSC_IN
-- Assign PH1 → RCC_OSC_OUT
-- Verify in Categories → System Core → RCC → GPIO Settings
+## The project is about:
 
-**Option 2 — Internal oscillator (HSI, default):**
-- No configuration needed
+- `encoder_EC11.h` - public API and data structures of the EC11 driver
+- `encoder_EC11.c` - driver implementation (tick accumulation, direction detection, button debounce)
 
-**System Clock:**
-- HSE 25 MHz: PLLM=25, PLLN=200, PLLP=2 → HCLK=100MHz
-- HSI 16 MHz: Enter HCLK=100MHz → CubeMX sets PLL automatically
+**EC11**  
+A common mechanical rotary encoder with two quadrature outputs (A and B) and an integrated push button.
 
-### 1.3 Encoder Pins
-- CLK (A) → PA0 → GPIO_EXTI0
-- DT  (B) → PA1 → GPIO_EXTI1
-- SW  → PA2 → GPIO_EXTI2
+**Quadrature signals (A/B)**  
+Two square-wave signals shifted by 90 degrees. By comparing their phase, rotation direction can be detected.
 
-GPIO Settings:
-- PA0/PA1: External Interrupt Mode, Rising/Falling edge, Pull-up
-- PA2: External Interrupt Mode, Falling edge, Pull-up
+**Tick**  
+A single raw increment or decrement produced by the hardware encoder interface.
 
-### 1.4 NVIC Interrupts
-- Enable EXTI0, EXTI1, EXTI2
-- Preemption Priority = 0 (default)
+**Detent / step**  
+A mechanical click position of the encoder. One step usually corresponds to several ticks (commonly 4).
 
-### 1.5 I2C Display
-- PB6 → I2C1_SCL
-- PB7 → I2C1_SDA
-- I2C Mode: Fast Mode (400 kHz)
-- GPIO Pull-up/Pull-down: as needed
+**TIM (Timer)**  
+A hardware timer peripheral in STM32. TIM2 is used here in encoder interface mode.
 
-### 1.6 Generate Code
-- Project Name: Encoder_EN11_Display
-- Toolchain: STM32CubeIDE (recommended)
-- Generate peripheral init files (.c/.h)
-- Click GENERATE CODE → Open Project
+**Encoder interface mode**  
+A special timer mode where the hardware decodes A/B signals and updates the counter automatically.
 
-## Part 2 — Firmware
+**GPIO**  
+General Purpose Input Output pin, used here for the encoder push button and LED.
 
-### 2.1 SSD1306 Library
-Create `ssd1306.h` and `ssd1306.c` or use an existing library.
+**HAL**  
+Hardware Abstraction Layer provided by ST. It simplifies peripheral access.
+
+**Debounce**  
+Filtering technique to ignore rapid signal changes caused by mechanical contacts.
+
+**Wraparound**  
+When a timer counter reaches its maximum value and overflows back to zero. The driver compensates for this.
+
+---
+
+## Wiring and hardware notes
+
+Typical connections for BlackPill STM32F411:
+
+- Encoder A - `PA0` (TIM2_CH1)
+- Encoder B - `PA1` (TIM2_CH2)
+- Encoder button - `PA2` (GPIO input with pull-up)
+- OLED SSD1306 - I2C1; example: `PB6` (SCL), `PB7` (SDA)
+- Blue LED - `PC13`
+
+Notes:
+- Encoder A and B should have pull-ups (internal or external).
+- The button is usually active-low (pressed = 0).
+- Check your board schematic before wiring.
+
+---
+
+## STM32CubeMX configuration
+
+1. Create a new project and select your MCU (for example STM32F411CEU6).
+2. Graphical pins configuration:
+  - `PC13` - GPIO Output (Blue LED)
+Encoder:
+  - Encoder A: `PA0` - TIM2_CH1 
+  - Encoder B: `PA1` - TIM2_CH2
+  - Encoder Button2 `PA2` - GPIO Input with Pull-Up
+  Optional:
+  - Encoder Button3 (Confirm) `PA3` - GPIO Input with Pull-Up
+  - Encoder Button4 (Back) `PA4` - GPIO Input with Pull-Up
+  Display: I2C pins for SSD1306 or SH1106
+  - Clock SCL: `PB6` - I2C1_SCL
+  - Data SDA: `PB7` - I2C1_SDA
+  
+3. Configure Timers: TIM2:
+  - Slave Mode: Disable
+  - Combined Channels: Encoder Mode
+  - Prescaler: 0
+  - Counter Mode: Up
+  - Counter Periode: `65535`
+  - Internal Clock: No Division
+  - auto-reload preload: Enable
+  - Encoder Mode: Encoder Mode TI1 and TI2
+  - Ch1/Ch2 Polarity: Rising Edge
+  - Ch1/Ch2 IC Selection: Direct
+  
+4. Configure System Core: GPIO: GPIO:
+  - `PA2` - GPIO: Input Mode
+  - `PA2` Pull-up/Pull-down: Pull-Up
+  - Same for other buttons: `PA3`, `PA4`
+5. Configure Connectivity: I2C1:
+  - `PB6` I2C1_SCL, Pull-up/Pull-down: No Pull-Up and No Pull-down
+  - `PB6` I2C1_SCL, Maximum output speed: Very high
+  - Same for `PB7` I2C1_SDA
+  
+6. Clock Configuration:
+  - HSI RC: 16 MHz
+  - System Clock Mux: HSI
+  - SYSCLK (MHz): 16
+  - HCLK (MHz): 16
+
+7. Project Manager:
+  - Application Structure: Basic
+  - Toolchain: STM32CubeIDE
+  - Code Generator: Generate per. `.c` / `.h` files per peripheral
+
+8. Generate code and open the project in CubeIDE.
+
+---
+
+## 5. STM32CubeIDE build and flash
+
+1. Open the generated project in STM32CubeIDE.
+2. Copy `encoder_EC11.h` into `Inc/` and `encoder_EC11.c` into `Src/`.
+3. Include the header in `main.c`.
+4. Build the project.
+5. Connect ST-Link and flash the firmware.
+
+---
+
+## 6. Using the encoder driver
+
+Typical usage pattern:
+
+1. Initialize the driver:
+  ```c
+  EC11_Encoder_t encoder;
+  EC11_Init(&encoder);
+  ```
+
+2. Start the hardware timer in encoder mode and reset it:
+  ```c
+  HAL_TIM_Encoder_Start(&htim2, TIM_CHANNEL_ALL);
+  ENC_RESET();
+  encoder.lastTimerValue = ENC_READ();
+  ```
+
+3. In the main loop:
+  - Read the timer value
+  - Get `diff` from the driver
+  - Pass `diff` to `EC11_ProcessTicks`
+  - Process the button with `EC11_ProcessButton`
+
+The application reads:
+- `encoder.step` - logical position in detents
+- `encoder.dir` - last direction
+- `encoder.buttonPressed` - button press event flag
+
+---
+
+## 7. Example: LED on/off per click
+
+Goal:
+- One click clockwise - LED ON
+- One click counter-clockwise - LED OFF
+
+Example code:
 
 ```c
-#ifndef SSD1306_H
-#define SSD1306_H
-#include "main.h"
-#define SSD1306_I2C_ADDR 0x78
-#define SSD1306_WIDTH 128
-#define SSD1306_HEIGHT 64
-void SSD1306_Init(void);
-void SSD1306_Clear(void);
-void SSD1306_UpdateScreen(void);
-void SSD1306_GotoXY(uint8_t x, uint8_t y);
-void SSD1306_Puts(char* str, uint8_t size);
-void SSD1306_DrawPixel(uint8_t x, uint8_t y, uint8_t color);
-#endif
-```
+int32_t lastStep = encoder.step;
 
-### 2.2 Encoder Handling (main.c)
-- Reads both pins on any interrupt
-- Detects full 4-transition cycles
-- Debounces button with 200ms window
+while (1) {
+   uint32_t now = HAL_GetTick();
 
-```c
-volatile int32_t encoder_value=0;
-volatile uint8_t encoder_button_pressed=0;
-volatile uint16_t encoder_state=0;
+   int32_t diff = EC11_TimerDiff16(&encoder, ENC_READ());
+   if (diff != 0) {
+      EC11_ProcessTicks(&encoder, diff);
+   }
 
-void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin){
- if(GPIO_Pin==GPIO_PIN_0||GPIO_Pin==GPIO_PIN_1){
-  uint8_t clk=HAL_GPIO_ReadPin(GPIOA,GPIO_PIN_0);
-  uint8_t dt=HAL_GPIO_ReadPin(GPIOA,GPIO_PIN_1);
-  uint8_t current=(clk<<1)|dt;
-  encoder_state=(encoder_state<<2)|current;
-  uint8_t pattern=encoder_state&0xFF;
-  if(pattern==0xE1) {encoder_value++;encoder_state=0;}
-  else if(pattern==0xD2){encoder_value--;encoder_state=0;}
- }
- if(GPIO_Pin==GPIO_PIN_2){
-  static uint32_t last_press=0;
-  uint32_t now=HAL_GetTick();
-  if((now-last_press)>200){
-   if(HAL_GPIO_ReadPin(GPIOA,GPIO_PIN_2)==GPIO_PIN_RESET){encoder_button_pressed=1;encoder_value=0;last_press=now;}
-  }
- }
+   EC11_ProcessButton(&encoder, (uint8_t)ENC_BTN_READ(), now, 50);
+
+   if (encoder.step > lastStep) {
+      LED_ON();
+      lastStep = encoder.step;
+   } else if (encoder.step < lastStep) {
+      LED_OFF();
+      lastStep = encoder.step;
+   }
 }
 ```
 
-## Part 3 — Hardware Connections
-**EN11 Encoder:**
-```
-CLK → PA0
-DT  → PA1
-SW  → PA2
-+   → 3.3V
-GND → GND
-```
-**SSD1306 I2C Display:**
-```
-VCC → 3.3V
-GND → GND
-SCL → PB6
-SDA → PB7
-```
+This approach reacts to logical steps, not raw ticks.
 
-## Part 4 — Notes and Fixes
-- Read both pins on any interrupt to prevent missed steps
-- Detect full 4-transition patterns: 0xE1 CW, 0xD2 CCW
-- Debounce button using 200ms window
-- Optional RC filters for encoder signals
-- Fast Mode I2C recommended for display
+---
 
-## Testing
-1. Flash firmware
-2. Rotate encoder → value increases/decreases
-3. Press button → resets value to 0
-4. Verify real-time display updates
+## 8. Troubleshooting
+
+- No reaction: check TIM2 encoder mode and wiring.
+- Direction reversed: swap A/B signals or invert logic.
+- Multiple steps per click: adjust ticks-per-step or timer input filter.
+- Button double triggers: increase debounce time.
+- Large first movement after reset: initialize `lastTimerValue` after resetting the timer.
+
+---
+
+This project is intended as a clean and understandable starting point for working with rotary encoders on STM32.
 

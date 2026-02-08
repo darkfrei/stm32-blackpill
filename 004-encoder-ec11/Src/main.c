@@ -10,6 +10,7 @@
   ******************************************************************************
   */
 /* USER CODE END Header */
+
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
 #include "i2c.h"
@@ -48,7 +49,6 @@
 /* USER CODE BEGIN PV */
 EC11_Encoder_t encoder;
 
-// uint16_t last_encoder_value = 0;
 uint32_t last_update = 0;
 uint32_t ups_counter = 0;
 uint32_t ups_value = 0;
@@ -72,7 +72,7 @@ void Display_Update(void);
 /* USER CODE END 0 */
 
 /**
-  * @brief  application entry point
+  * @brief  The application entry point.
   * @retval int
   */
 int main(void)
@@ -80,23 +80,24 @@ int main(void)
   /* USER CODE BEGIN 1 */
   /* USER CODE END 1 */
 
-  /* reset peripherals, init flash and systick */
+  /* MCU Configuration--------------------------------------------------------*/
+
+  /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
   HAL_Init();
 
   /* USER CODE BEGIN Init */
   /* USER CODE END Init */
 
-  /* configure system clock */
+  /* Configure the system clock */
   SystemClock_Config();
 
   /* USER CODE BEGIN SysInit */
   /* USER CODE END SysInit */
 
-  /* initialize configured peripherals */
+  /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_I2C1_Init();
   MX_TIM2_Init();
-
   /* USER CODE BEGIN 2 */
   /* small delay for power and display startup */
   HAL_Delay(50);
@@ -114,14 +115,11 @@ int main(void)
   ssd1306_UpdateScreen();
 
   /* initialize encoder driver */
-  EC11_Init(&encoder);
+  EC11_Init(&encoder);  // Исправлено: убран второй параметр
 
   /* start encoder timer */
   HAL_TIM_Encoder_Start(&htim2, TIM_CHANNEL_ALL);
   ENC_RESET();
-
-  /* seed driver's timer baseline to avoid spurious first diff */
-  encoder.lastTimerValue = ENC_READ();
 
   last_update = HAL_GetTick();
   last_ups_time = HAL_GetTick();
@@ -130,21 +128,17 @@ int main(void)
   Display_Init();
   /* USER CODE END 2 */
 
-  /* infinite loop */
+  /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1)
   {
-  /* USER CODE END WHILE */
+    /* USER CODE END WHILE */
 
-  /* USER CODE BEGIN 3 */
+    /* USER CODE BEGIN 3 */
     uint32_t now = HAL_GetTick();
 
-    /* read hardware timer value */
-    uint16_t current_value = ENC_READ();
-    
-    /* read hardware timer and get signed diff (driver handles wraparound) */
+    /* read hardware timer value and get signed diff with wraparound handling */
     int32_t diff = EC11_TimerDiff16(&encoder, ENC_READ());
-
 
     /* process encoder rotation through driver */
     if (diff != 0) {
@@ -162,10 +156,9 @@ int main(void)
         EC11_Reset(&encoder);
         ENC_RESET();
 
-        /* reseed driver baseline after timer reset */
-        encoder.lastTimerValue = ENC_READ();
+        /* reset driver's internal timer baseline */
+        encoder.lastTimerValue = 0;  // Сброс внутреннего значения таймера
 
-        encoder.buttonPressed = 0;
         display_dirty = 1;
     }
 
@@ -187,43 +180,50 @@ int main(void)
     }
 
     /* non-blocking screen update if supported */
-    if (ssd1306DirtyFlag) {
-        ssd1306_UpdateScreenChunk();
-    }
+    // Убедитесь, что ssd1306DirtyFlag объявлен в вашей библиотеке SSD1306
+    // Если нет, используйте прямой вызов:
+    // ssd1306_UpdateScreen();
+    /* USER CODE END 3 */
   }
-  /* USER CODE END 3 */
 }
 
 /**
-  * @brief system clock configuration
+  * @brief System Clock Configuration
+  * @retval None
   */
 void SystemClock_Config(void)
 {
   RCC_OscInitTypeDef RCC_OscInitStruct = {0};
   RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
 
+  /** Configure the main internal regulator output voltage
+  */
   __HAL_RCC_PWR_CLK_ENABLE();
   __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE1);
 
+  /** Initializes the RCC Oscillators according to the specified parameters
+  * in the RCC_OscInitTypeDef structure.
+  */
   RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI;
   RCC_OscInitStruct.HSIState = RCC_HSI_ON;
   RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
   RCC_OscInitStruct.PLL.PLLState = RCC_PLL_NONE;
-
-  if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK) {
+  if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
+  {
     Error_Handler();
   }
 
-  RCC_ClkInitStruct.ClockType =
-      RCC_CLOCKTYPE_HCLK | RCC_CLOCKTYPE_SYSCLK |
-      RCC_CLOCKTYPE_PCLK1 | RCC_CLOCKTYPE_PCLK2;
-
+  /** Initializes the CPU, AHB and APB buses clocks
+  */
+  RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
+                              |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
   RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_HSI;
   RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
   RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV1;
   RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;
 
-  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_0) != HAL_OK) {
+  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_0) != HAL_OK)
+  {
     Error_Handler();
   }
 }
@@ -239,9 +239,6 @@ void Display_Init(void)
 
     ssd1306_SetCursor(20, 2);
     ssd1306_WriteString("EC11 Encoder", Font_6x8, White);
-    
-    
-    
 
     ssd1306_SetCursor(4, 22);
     ssd1306_WriteString("Step:", Font_6x8, White);
@@ -270,12 +267,6 @@ void Display_Update(void)
     ssd1306_SetCursor(4, 12);
     ssd1306_WriteString(display_buf, Font_6x8, White);
 
-    /* raw tim2 counter value */
-    // uint16_t raw = ENC_READ();
-    // snprintf(display_buf, sizeof(display_buf), "TIM2:%u", raw);
-    // ssd1306_SetCursor(60, 12);
-    // ssd1306_WriteString(display_buf, Font_6x8, White);
-
     /* step counter */
     snprintf(display_buf, sizeof(display_buf), "%3ld", encoder.step);
     ssd1306_SetCursor(30, 22);
@@ -292,24 +283,32 @@ void Display_Update(void)
     ssd1306_WriteString(temp_buf, Font_6x8, White);
 
     /* button state */
-    const char *btn_text = (encoder.buttonState == 0) ? "PRESSED" : "RELEASED";
+    const char *btn_text = (encoder.buttonState == 0) ? "PRESSED " : "RELEASED";
     strncpy(temp_buf, btn_text, sizeof(temp_buf) - 1);
     temp_buf[sizeof(temp_buf) - 1] = '\0';
     ssd1306_SetCursor(50, 42);
     ssd1306_WriteString(temp_buf, Font_6x8, White);
+
+    /* button press event indicator */
+    if (encoder.buttonPressed) {
+        ssd1306_SetCursor(90, 42);
+        ssd1306_WriteString("!", Font_6x8, White);
+    }
 
     /* ups */
     snprintf(display_buf, sizeof(display_buf), "%4lu", ups_value);
     ssd1306_SetCursor(40, 52);
     ssd1306_WriteString(display_buf, Font_6x8, White);
 
-    ssd1306DirtyFlag = 1;
+    // Обновляем экран
+    ssd1306_UpdateScreen();
 }
 
 /* USER CODE END 4 */
 
 /**
-  * @brief error handler
+  * @brief  This function is executed in case of error occurrence.
+  * @retval None
   */
 void Error_Handler(void)
 {
@@ -318,10 +317,19 @@ void Error_Handler(void)
   while (1) { }
   /* USER CODE END Error_Handler_Debug */
 }
-
 #ifdef USE_FULL_ASSERT
+/**
+  * @brief  Reports the name of the source file and the source line number
+  *         where the assert_param error has occurred.
+  * @param  file: pointer to the source file name
+  * @param  line: assert_param error line source number
+  * @retval None
+  */
 void assert_failed(uint8_t *file, uint32_t line)
 {
-  /* user can add his own implementation */
+  /* USER CODE BEGIN 6 */
+  /* User can add his own implementation to report the file name and line number,
+     ex: printf("Wrong parameters value: file %s on line %d\r\n", file, line) */
+  /* USER CODE END 6 */
 }
-#endif
+#endif /* USE_FULL_ASSERT */

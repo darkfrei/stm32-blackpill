@@ -337,9 +337,13 @@ uint16_t SH1106_GetTotalChunks(void) {
  * DRAWING PRIMITIVES
  * ======================================================================== */
 
-void SH1106_DrawPixel(uint8_t x, uint8_t y, SH1106_COLOR_t color) {
-    if (x >= SH1106_WIDTH || y >= SH1106_HEIGHT) {
-        return;  // Out of bounds
+void SH1106_DrawPixel(int16_t x, uint8_t y, SH1106_COLOR_t color) {
+    // if (x >= SH1106_WIDTH || y >= SH1106_HEIGHT) {
+        // return;  // Out of bounds
+    // }
+    
+    if (x < 0 || x >= SH1106_WIDTH || y >= SH1106_HEIGHT) {
+      return;  // Out of bounds
     }
     
     // Calculate buffer position
@@ -354,7 +358,7 @@ void SH1106_DrawPixel(uint8_t x, uint8_t y, SH1106_COLOR_t color) {
     }
 }
 
-void SH1106_DrawLine(uint8_t x0, uint8_t y0, uint8_t x1, uint8_t y1, SH1106_COLOR_t color) {
+void SH1106_DrawLine(int16_t x0, uint8_t y0, int16_t x1, uint8_t y1, SH1106_COLOR_t color) {
     // Bresenham's line algorithm
     int16_t dx = abs(x1 - x0);
     int16_t dy = abs(y1 - y0);
@@ -383,7 +387,7 @@ void SH1106_DrawLine(uint8_t x0, uint8_t y0, uint8_t x1, uint8_t y1, SH1106_COLO
     }
 }
 
-void SH1106_DrawRectangle(uint8_t x, uint8_t y, uint8_t w, uint8_t h, SH1106_COLOR_t color) {
+void SH1106_DrawRectangle(int16_t x, uint8_t y, uint8_t w, uint8_t h, SH1106_COLOR_t color) {
     // Draw four lines to form rectangle
     SH1106_DrawLine(x, y, x + w - 1, y, color);              // Top
     SH1106_DrawLine(x, y + h - 1, x + w - 1, y + h - 1, color);  // Bottom
@@ -391,13 +395,13 @@ void SH1106_DrawRectangle(uint8_t x, uint8_t y, uint8_t w, uint8_t h, SH1106_COL
     SH1106_DrawLine(x + w - 1, y, x + w - 1, y + h - 1, color);  // Right
 }
 
-void SH1106_FillRectangle(uint8_t x, uint8_t y, uint8_t w, uint8_t h, SH1106_COLOR_t color) {
+void SH1106_FillRectangle(int16_t x, uint8_t y, uint8_t w, uint8_t h, SH1106_COLOR_t color) {
     for (uint8_t i = 0; i < h; i++) {
         SH1106_DrawLine(x, y + i, x + w - 1, y + i, color);
     }
 }
 
-void SH1106_DrawCircle(uint8_t x0, uint8_t y0, uint8_t r, SH1106_COLOR_t color) {
+void SH1106_DrawCircle(int16_t x0, uint8_t y0, uint8_t r, SH1106_COLOR_t color) {
     // Bresenham's circle algorithm
     int16_t x = r;
     int16_t y = 0;
@@ -422,7 +426,7 @@ void SH1106_DrawCircle(uint8_t x0, uint8_t y0, uint8_t r, SH1106_COLOR_t color) 
     }
 }
 
-void SH1106_FillCircle(uint8_t x0, uint8_t y0, uint8_t r, SH1106_COLOR_t color) {
+void SH1106_FillCircle(int16_t x0, uint8_t y0, uint8_t r, SH1106_COLOR_t color) {
     int16_t x = r;
     int16_t y = 0;
     int16_t err = 0;
@@ -442,7 +446,7 @@ void SH1106_FillCircle(uint8_t x0, uint8_t y0, uint8_t r, SH1106_COLOR_t color) 
     }
 }
 
-void SH1106_DrawBitmap(uint8_t x, uint8_t y, const uint8_t* bitmap, uint8_t w, uint8_t h, SH1106_COLOR_t color) {
+void SH1106_DrawBitmap(int16_t x, uint8_t y, const uint8_t* bitmap, uint8_t w, uint8_t h, SH1106_COLOR_t color) {
     for (uint8_t j = 0; j < h; j++) {
         for (uint8_t i = 0; i < w; i++) {
             uint8_t byte = bitmap[j * ((w + 7) / 8) + i / 8];
@@ -456,104 +460,124 @@ void SH1106_DrawBitmap(uint8_t x, uint8_t y, const uint8_t* bitmap, uint8_t w, u
 }
 
 /* ========================================================================
- * TEXT RENDERING
+ * TEXT RENDERING (pixel-clipped, supports negative X)
  * ======================================================================== */
 
-void SH1106_SetCursor(uint8_t x, uint8_t y) {
+void SH1106_SetCursor(int16_t x, uint8_t y) {
     sh1106.current_x = x;
     sh1106.current_y = y;
 }
 
-void SH1106_GetCursor(uint16_t* x, uint16_t* y) {
-    if (x) *x = sh1106.current_x;
-    if (y) *y = sh1106.current_y;
+void SH1106_GetCursor(int16_t* x, uint16_t* y) {
+    if (x) {
+        *x = sh1106.current_x;
+    }
+    if (y) {
+        *y = sh1106.current_y;
+    }
 }
 
 char SH1106_WriteChar(char ch, SH1106_Font_t font, SH1106_COLOR_t color) {
-    // Check if character is printable
     if (ch < 32 || ch > 126) {
         return 0;
     }
-    
-    // Get character width
-    uint8_t char_width;
-    if (font.char_width) {
-        // Proportional font
-        char_width = font.char_width[ch - 32];
-    } else {
-        // Monospace font
-        char_width = font.width;
+
+    uint8_t char_index = (uint8_t)(ch - 32);
+    uint8_t char_width =
+        font.char_width ? font.char_width[char_index] : font.width;
+
+    int8_t y_offset = font.y_offset ? font.y_offset[char_index] : 0;
+
+    int16_t base_x = sh1106.current_x;
+    int16_t base_y = (int16_t)sh1106.current_y
+                   + font.baseline
+                   + y_offset;
+
+    uint16_t glyph_offset = (uint16_t)char_index * font.height;
+
+    /* determine visible column range in glyph */
+    int16_t glyph_col_start = 0;
+    int16_t glyph_col_end   = char_width;
+
+    if (base_x < 0) {
+        glyph_col_start = -base_x;
     }
-    
-    // Check if character fits on screen
-    if (sh1106.current_x + char_width > SH1106_WIDTH) {
-        return 0;
+
+    if (base_x + char_width > SH1106_WIDTH) {
+        glyph_col_end = SH1106_WIDTH - base_x;
     }
-    
-    // For Font_8H (proportional font stored as fixed-width array)
-    // Each character occupies font.width * font.height bytes in data array
-    // For monospace fonts, same calculation works
-    uint16_t char_index = ch - 32;
-    uint16_t char_offset = char_index * font.width;  // Start offset for this character
-    
-    // Draw character column by column
-    for (uint8_t col = 0; col < char_width; col++) {
-        if (sh1106.current_x + col >= SH1106_WIDTH) break;
-        
-        // Get the column data for this character
-        uint16_t column_data = font.data[char_offset + col];
-        
-        // Draw each pixel in this column
-        for (uint8_t row = 0; row < font.height; row++) {
-            if (sh1106.current_y + row >= SH1106_HEIGHT) break;
-            
-            // Check if this pixel should be drawn
-            if (column_data & (1 << row)) {
-                SH1106_DrawPixel(sh1106.current_x + col, sh1106.current_y + row, color);
+
+    if (glyph_col_start >= glyph_col_end) {
+        sh1106.current_x += char_width + 1;
+        return ch;
+    }
+
+    for (uint8_t row = 0; row < font.height; row++) {
+        uint16_t row_bits = font.data[glyph_offset + row];
+
+        for (int16_t glyph_col = glyph_col_start;
+             glyph_col < glyph_col_end;
+             glyph_col++) {
+
+            if (row_bits & (1U << (15 - glyph_col))) {
+
+                int16_t px = base_x + glyph_col;
+                int16_t py = base_y + row - font.baseline;
+
+                if (py >= 0 && py < SH1106_HEIGHT) {
+                    SH1106_DrawPixel(
+                        (uint8_t)px,
+                        (uint8_t)py,
+                        color
+                    );
+                }
             }
-            // Note: We don't draw background pixels - transparent text
         }
     }
-    
-    // Advance cursor (character width + 1 pixel spacing)
-    sh1106.current_x += char_width + 1;
-    
+
+    // sh1106.current_x += char_width + 1;
+    sh1106.current_x += char_width;
     return ch;
 }
 
-uint16_t SH1106_WriteString(const char* str, SH1106_Font_t font, SH1106_COLOR_t color) {
-    uint16_t count = 0;
-    
+uint16_t SH1106_WriteString(const char* str,
+                            SH1106_Font_t font,
+                            SH1106_COLOR_t color) {
+    uint16_t written = 0;
+
     while (*str) {
         if (SH1106_WriteChar(*str, font, color)) {
-            count++;
-        } else {
-            break;  // Character didn't fit
+            written++;
         }
         str++;
     }
-    
-    return count;
+
+    return written;
 }
 
-uint16_t SH1106_WriteStringAt(uint8_t x, uint8_t y, const char* str, SH1106_Font_t font, SH1106_COLOR_t color) {
+uint16_t SH1106_WriteStringAt(int16_t x,
+                              uint8_t y,
+                              const char* str,
+                              SH1106_Font_t font,
+                              SH1106_COLOR_t color) {
     SH1106_SetCursor(x, y);
     return SH1106_WriteString(str, font, color);
 }
 
 uint16_t SH1106_GetStringWidth(const char* str, SH1106_Font_t font) {
     uint16_t width = 0;
-    
+
     while (*str) {
         if (*str >= 32 && *str <= 126) {
             if (font.char_width) {
-                width += font.char_width[*str - 32] + 1;  // +1 for spacing
+                width += font.char_width[*str - 32] + 1;
             } else {
                 width += font.width + 1;
             }
         }
         str++;
     }
-    
-    return width > 0 ? width - 1 : 0;  // Remove last spacing
+
+    /* remove last spacing */
+    return (width > 0) ? (width - 1) : 0;
 }

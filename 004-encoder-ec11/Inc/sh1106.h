@@ -45,18 +45,22 @@ typedef struct {
     uint8_t width;              /**< Maximum character width in pixels */
     uint8_t height;             /**< Font height in pixels */
     const uint16_t *data;       /**< Pointer to font data array */
-    const uint8_t *char_width;  /**< Pointer to character width array (NULL for monospace) */
+    const uint8_t *char_width;  /**< Pointer to character width array */
+    const int8_t *y_offset;     /**< Pointer to Y offset array (for descenders) */
+    uint8_t baseline;           /**< Baseline position from top */
 } SH1106_Font_t;
 
 /**
  * @brief Display structure containing state information
  */
+ 
 typedef struct {
-    uint16_t current_x;         /**< Current X position for text cursor */
-    uint16_t current_y;         /**< Current Y position for text cursor */
-    bool initialized;           /**< Initialization flag */
-    bool inverted;              /**< Color inversion flag */
+    int16_t current_x;
+    uint16_t current_y;
+    bool initialized;
+    bool inverted;
 } SH1106_t;
+
 
 /* ========================================================================
  * FUNCTION PROTOTYPES - BASIC OPERATIONS
@@ -124,7 +128,7 @@ void SH1106_SetBrightness(uint8_t value);
  * @param y Y coordinate (0 to HEIGHT-1)
  * @param color Pixel color
  */
-void SH1106_DrawPixel(uint8_t x, uint8_t y, SH1106_COLOR_t color);
+void SH1106_DrawPixel(int16_t x, uint8_t y, SH1106_COLOR_t color);
 
 /**
  * @brief Draw a line from (x0,y0) to (x1,y1)
@@ -134,7 +138,7 @@ void SH1106_DrawPixel(uint8_t x, uint8_t y, SH1106_COLOR_t color);
  * @param y1 End Y coordinate
  * @param color Line color
  */
-void SH1106_DrawLine(uint8_t x0, uint8_t y0, uint8_t x1, uint8_t y1, SH1106_COLOR_t color);
+void SH1106_DrawLine(int16_t x0, uint8_t y0, int16_t x1, uint8_t y1, SH1106_COLOR_t color);
 
 /**
  * @brief Draw a rectangle outline
@@ -144,7 +148,7 @@ void SH1106_DrawLine(uint8_t x0, uint8_t y0, uint8_t x1, uint8_t y1, SH1106_COLO
  * @param h Height
  * @param color Rectangle color
  */
-void SH1106_DrawRectangle(uint8_t x, uint8_t y, uint8_t w, uint8_t h, SH1106_COLOR_t color);
+void SH1106_DrawRectangle(int16_t x, uint8_t y, uint8_t w, uint8_t h, SH1106_COLOR_t color);
 
 /**
  * @brief Draw a filled rectangle
@@ -154,7 +158,7 @@ void SH1106_DrawRectangle(uint8_t x, uint8_t y, uint8_t w, uint8_t h, SH1106_COL
  * @param h Height
  * @param color Fill color
  */
-void SH1106_FillRectangle(uint8_t x, uint8_t y, uint8_t w, uint8_t h, SH1106_COLOR_t color);
+void SH1106_FillRectangle(int16_t x, uint8_t y, uint8_t w, uint8_t h, SH1106_COLOR_t color);
 
 /**
  * @brief Draw a circle outline
@@ -163,7 +167,7 @@ void SH1106_FillRectangle(uint8_t x, uint8_t y, uint8_t w, uint8_t h, SH1106_COL
  * @param r Radius
  * @param color Circle color
  */
-void SH1106_DrawCircle(uint8_t x0, uint8_t y0, uint8_t r, SH1106_COLOR_t color);
+void SH1106_DrawCircle(int16_t x0, uint8_t y0, uint8_t r, SH1106_COLOR_t color);
 
 /**
  * @brief Draw a filled circle
@@ -172,7 +176,7 @@ void SH1106_DrawCircle(uint8_t x0, uint8_t y0, uint8_t r, SH1106_COLOR_t color);
  * @param r Radius
  * @param color Fill color
  */
-void SH1106_FillCircle(uint8_t x0, uint8_t y0, uint8_t r, SH1106_COLOR_t color);
+void SH1106_FillCircle(int16_t x0, uint8_t y0, uint8_t r, SH1106_COLOR_t color);
 
 /**
  * @brief Draw a bitmap image
@@ -183,7 +187,7 @@ void SH1106_FillCircle(uint8_t x0, uint8_t y0, uint8_t r, SH1106_COLOR_t color);
  * @param h Height of bitmap
  * @param color Foreground color
  */
-void SH1106_DrawBitmap(uint8_t x, uint8_t y, const uint8_t* bitmap, uint8_t w, uint8_t h, SH1106_COLOR_t color);
+void SH1106_DrawBitmap(int16_t x, uint8_t y, const uint8_t* bitmap, uint8_t w, uint8_t h, SH1106_COLOR_t color);
 
 /* ========================================================================
  * FUNCTION PROTOTYPES - TEXT RENDERING
@@ -191,17 +195,17 @@ void SH1106_DrawBitmap(uint8_t x, uint8_t y, const uint8_t* bitmap, uint8_t w, u
 
 /**
  * @brief Set cursor position for text
- * @param x X coordinate
+ * @param x X coordinate (can be negative for clipped rendering)
  * @param y Y coordinate
  */
-void SH1106_SetCursor(uint8_t x, uint8_t y);
+void SH1106_SetCursor(int16_t x, uint8_t y);
 
 /**
  * @brief Get current cursor position
  * @param x Pointer to store X coordinate
  * @param y Pointer to store Y coordinate
  */
-void SH1106_GetCursor(uint16_t* x, uint16_t* y);
+void SH1106_GetCursor(int16_t* x, uint16_t* y);
 
 /**
  * @brief Write a single character at current cursor position
@@ -223,14 +227,15 @@ uint16_t SH1106_WriteString(const char* str, SH1106_Font_t font, SH1106_COLOR_t 
 
 /**
  * @brief Write a string at specific position
- * @param x X coordinate
+ * @param x X coordinate (can be negative for clipped rendering)
  * @param y Y coordinate
  * @param str String to write
  * @param font Font to use
  * @param color Text color
  * @return Number of characters written
  */
-uint16_t SH1106_WriteStringAt(uint8_t x, uint8_t y, const char* str, SH1106_Font_t font, SH1106_COLOR_t color);
+uint16_t SH1106_WriteStringAt(int16_t x, uint8_t y, const char* str,
+                             SH1106_Font_t font, SH1106_COLOR_t color);
 
 /**
  * @brief Calculate pixel width of a string
@@ -239,6 +244,7 @@ uint16_t SH1106_WriteStringAt(uint8_t x, uint8_t y, const char* str, SH1106_Font
  * @return Width in pixels
  */
 uint16_t SH1106_GetStringWidth(const char* str, SH1106_Font_t font);
+
 
 /* ========================================================================
  * FUNCTION PROTOTYPES - BUFFER ACCESS

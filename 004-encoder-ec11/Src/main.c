@@ -21,8 +21,8 @@
 /* USER CODE BEGIN Includes */
 #include <stdio.h>
 #include <string.h>
-#include "sh1106.h"           // ← исправлено: строчные буквы
-#include "sh1106_fonts.h"     // ← исправлено: строчные буквы
+#include "sh1106.h"
+#include "sh1106_fonts.h"
 #include "encoder_EC11.h"
 /* USER CODE END Includes */
 
@@ -58,6 +58,16 @@ uint8_t display_dirty = 1;
 
 char display_buf[48];
 char temp_buf[16];
+
+/* ASCII scrolling state: starting X position (0..127) */
+// static uint8_t ascii_x = 0;
+static int16_t ascii_x = 0;
+
+/* printable ASCII from 32 (space) to 126 (~) */
+static const char ascii_line[] =
+  " !\"#$%&'()*+,-./0123456789:;<=>?@"
+  "ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`"
+  "abcdefghijklmnopqrstuvwxyz{|}~";
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -99,12 +109,12 @@ int main(void)
   MX_I2C1_Init();
   MX_TIM2_Init();
   /* USER CODE BEGIN 2 */
-  
+
   /* small delay for power and display startup */
   HAL_Delay(50);
 
   /* initialize oled */
-  if (SH1106_Init() != SH1106_OK) {  // ← исправлено: используем SH1106_OK
+  if (SH1106_Init() != SH1106_OK) {
       /* blink led forever on oled init failure */
       while (1) {
           LED_TOGGLE();
@@ -127,7 +137,7 @@ int main(void)
 
   /* draw static display layout */
   Display_Init();
-  
+
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -145,8 +155,20 @@ int main(void)
     /* process encoder rotation through driver */
     if (diff != 0) {
         EC11_ProcessTicks(&encoder, diff);
+
+        /* subtract diff: left rotation moves text left */
+        ascii_x += (int16_t)diff;
+
+        // /* normalize into 0..127 range */
+        // if (ascii_x < 0) {
+            // ascii_x += 128;
+        // } else if (ascii_x >= 128) {
+            // ascii_x -= 128;
+        // }
+
         display_dirty = 1;
     }
+
 
     /* read button and process through driver (use debounce e.g. 50 ms) */
     uint8_t button_raw = (uint8_t)ENC_BTN_READ();
@@ -237,7 +259,16 @@ void Display_Init(void)
     SH1106_DrawRectangle(0, 0, 127, 63, SH1106_COLOR_WHITE);
 
     SH1106_WriteStringAt(20, 2, "EC11 Encoder", Font_8H, SH1106_COLOR_WHITE);
-    SH1106_WriteStringAt(4, 22, "Step:", Font_8H, SH1106_COLOR_WHITE);
+
+    /* Second line: static labels for A, B and Step (values updated dynamically) */
+    SH1106_WriteStringAt(4, 12, "A:", Font_8H, SH1106_COLOR_WHITE);
+    SH1106_WriteStringAt(28,12, "B:", Font_8H, SH1106_COLOR_WHITE);
+    SH1106_WriteStringAt(60,12, "Step:", Font_8H, SH1106_COLOR_WHITE);
+
+    /* Third line (y=22) will display ASCII characters (dynamic, scroll by 1px on rotate) */
+    /* leave no static label here */
+
+    /* remaining static labels */
     SH1106_WriteStringAt(4, 32, "Dir:", Font_8H, SH1106_COLOR_WHITE);
     SH1106_WriteStringAt(4, 42, "Button:", Font_8H, SH1106_COLOR_WHITE);
     SH1106_WriteStringAt(4, 52, "UPS:", Font_8H, SH1106_COLOR_WHITE);
@@ -251,21 +282,21 @@ void Display_Init(void)
 void Display_Update(void)
 {
     /* clear dynamic areas to prevent text artifacts */
-    SH1106_FillRectangle(4, 12, 120, 8, SH1106_COLOR_BLACK);   // GPIO line
-    SH1106_FillRectangle(30, 22, 90, 8, SH1106_COLOR_BLACK);   // Step
-    SH1106_FillRectangle(40, 32, 80, 8, SH1106_COLOR_BLACK);   // Direction
-    SH1106_FillRectangle(50, 42, 70, 8, SH1106_COLOR_BLACK);   // Button
-    SH1106_FillRectangle(40, 52, 80, 8, SH1106_COLOR_BLACK);   // UPS
-    
+    SH1106_FillRectangle(4, 12, 120, 8, SH1106_COLOR_BLACK);   /* A, B, Step area */
+    SH1106_FillRectangle(4, 22, 120, 8, SH1106_COLOR_BLACK);   /* ASCII area */
+    SH1106_FillRectangle(40, 32, 80, 8, SH1106_COLOR_BLACK);   /* Direction */
+    SH1106_FillRectangle(50, 42, 70, 8, SH1106_COLOR_BLACK);   /* Button */
+    SH1106_FillRectangle(40, 52, 80, 8, SH1106_COLOR_BLACK);   /* UPS */
+
     /* gpio diagnostic (encoder input states) */
     uint8_t pa0 = HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_0);
     uint8_t pa1 = HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_1);
-    snprintf(display_buf, sizeof(display_buf), "A:%d B:%d", pa0, pa1);
+    /* write A, B and Step on the same (second) line */
+    snprintf(display_buf, sizeof(display_buf), "A:%d B:%d Step:%ld", pa0, pa1, encoder.step);
     SH1106_WriteStringAt(4, 12, display_buf, Font_8H, SH1106_COLOR_WHITE);
 
-    /* step counter */
-    snprintf(display_buf, sizeof(display_buf), "%ld", encoder.step);
-    SH1106_WriteStringAt(45, 22, display_buf, Font_8H, SH1106_COLOR_WHITE);
+    /* ASCII line: draw at ascii_x (shifts by 1 pixel per encoder tick) */
+    SH1106_WriteStringAt(ascii_x, 22, ascii_line, Font_8H, SH1106_COLOR_WHITE);
 
     /* direction */
     const char *dir_text = "---";

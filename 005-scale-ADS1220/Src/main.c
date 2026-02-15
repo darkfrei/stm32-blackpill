@@ -2,7 +2,7 @@
 /**
   ******************************************************************************
   * @file           : main.c
-  * @brief          : ADS1220 Load Cell Test with Diagnostics
+  * @brief          : ADS1220 Digital Scale with Integer Math
   ******************************************************************************
   * @attention
   * Copyright (c) 2026 STMicroelectronics.
@@ -50,7 +50,7 @@ ADS1220_Handle_t hads1220;
 EC11_Encoder_t encoder;
 
 int32_t adc_code = 0;
-float voltage_mv = 0.0f;
+int32_t adc_raw = 0;
 uint8_t drdy_status = 0;
 
 uint32_t last_update = 0;
@@ -62,6 +62,14 @@ uint8_t ads_init_ok = 0;
 uint8_t reg_check[4] = {0};
 
 char display_buf[64];
+
+/* Scale calibration - integer math */
+int32_t tare_offset = 0;
+int32_t weight_grams_x10 = 0;
+// int32_t calibration_divisor = 180;
+int32_t calibration_divisor = 1724;
+uint8_t tare_pressed = 0;
+uint8_t last_button_state = 1;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -69,11 +77,16 @@ void SystemClock_Config(void);
 /* USER CODE BEGIN PFP */
 void Display_Init(void);
 void Display_Update(void);
-void ADS1220_Diagnostics(void);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+
+static void adsCsLow(void);
+static void adsCsHigh(void);
+static int  adsSpiTxRx(const uint8_t *tx, uint8_t *rx, uint16_t len);
+static uint8_t adsDrdyRead(void);
+
 /* USER CODE END 0 */
 
 /**
@@ -91,6 +104,14 @@ int main(void)
   HAL_Init();
 
   /* USER CODE BEGIN Init */
+  
+  hads1220.csLow   = adsCsLow;
+  hads1220.csHigh  = adsCsHigh;
+  hads1220.spiTxRx = adsSpiTxRx;
+  hads1220.drdyRead= adsDrdyRead;
+  hads1220.gain = 128;
+  hads1220.vref = 2.048f;
+
   /* USER CODE END Init */
 
   /* Configure the system clock */
@@ -111,7 +132,6 @@ int main(void)
 
   /* Initialize OLED display */
   if (SH1106_Init() != SH1106_OK) {
-      /* Blink LED on display init failure */
       while (1) {
           LED_TOGGLE();
           HAL_Delay(200);
@@ -126,19 +146,17 @@ int main(void)
   HAL_TIM_Encoder_Start(&htim2, TIM_CHANNEL_ALL);
 
   /* Initialize ADS1220 */
-  hads1220.hspi = &hspi1;
-  hads1220.cs_port = GPIOB;
-  hads1220.cs_pin = GPIO_PIN_0;
-  hads1220.drdy_port = GPIOB;
-  hads1220.drdy_pin = GPIO_PIN_1;
-
-  if (ADS1220_Init(&hads1220) != ADS1220_OK) {
+  if (ADS1220_Init(&hads1220) == ADS1220_OK) {
+      ads_init_ok = 1;
+      hads1220.gain = 128;
+  } else {
       ads_init_ok = 0;
-      /* Show error on display */
       SH1106_WriteStringAt(10, 28, "ADS1220 INIT FAIL", Font_8H, SH1106_COLOR_WHITE);
       SH1106_UpdateScreen();
-  } else {
-      ads_init_ok = 1;
+      while(1) {
+          LED_TOGGLE();
+          HAL_Delay(500);
+      }
   }
 
   /* Read back registers for diagnostics */
@@ -168,13 +186,19 @@ int main(void)
 
     /* Read ADS1220 data */
     if (ads_init_ok) {
-        if (ADS1220_ReadData(&hads1220, &adc_code) == ADS1220_OK) {
-            voltage_mv = ADS1220_CodeToVoltage(&hads1220, adc_code) * 1000.0f;
+        if (ADS1220_ReadData(&hads1220, &adc_raw) == ADS1220_OK) {
+            adc_code = adc_raw - tare_offset;
+            
+            /* Calculate weight using integer math */
+            /* weight_grams_x10 = (adc_code * 10) / divisor */
+            /* This gives grams with 1 decimal place */
+            weight_grams_x10 = (adc_code * 10) / calibration_divisor;
+            
             sample_count++;
         }
     }
 
-    /* Check DRDY status for display */
+    /* Check DRDY status */
     drdy_status = ADS1220_DataReady(&hads1220);
 
     /* Calculate samples per second */
@@ -183,6 +207,17 @@ int main(void)
         sample_count = 0;
         last_sps_time = now;
     }
+
+    /* Tare button handling (PA3 - Confirm button) */
+    uint8_t button_state = HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_3);
+    if (button_state == GPIO_PIN_RESET && last_button_state == GPIO_PIN_SET) {
+        HAL_Delay(50);
+        if (HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_3) == GPIO_PIN_RESET) {
+            tare_offset = adc_raw;
+            tare_pressed = 1;
+        }
+    }
+    last_button_state = button_state;
 
     /* Update display periodically */
     if ((now - last_update) >= UPDATE_DELAY_MS) {
@@ -250,14 +285,13 @@ void Display_Init(void)
     SH1106_Fill(SH1106_COLOR_BLACK);
     SH1106_DrawRectangle(0, 0, 127, 63, SH1106_COLOR_WHITE);
 
-    SH1106_WriteStringAt(10, 2, "ADS1220 Diag", Font_8H, SH1106_COLOR_WHITE);
+    SH1106_WriteStringAt(20, 2, "Digital Scale", Font_8H, SH1106_COLOR_WHITE);
 
-    SH1106_WriteStringAt(2, 12, "ADC:", Font_8H, SH1106_COLOR_WHITE);
-    SH1106_WriteStringAt(2, 20, "mV:", Font_8H, SH1106_COLOR_WHITE);
-    SH1106_WriteStringAt(2, 28, "SPS:", Font_8H, SH1106_COLOR_WHITE);
-    SH1106_WriteStringAt(2, 36, "DRDY:", Font_8H, SH1106_COLOR_WHITE);
-    SH1106_WriteStringAt(2, 44, "Regs:", Font_8H, SH1106_COLOR_WHITE);
-    SH1106_WriteStringAt(2, 52, "Init:", Font_8H, SH1106_COLOR_WHITE);
+    /* Labels */
+    SH1106_WriteStringAt(2, 14, "Weight:", Font_8H, SH1106_COLOR_WHITE);
+    SH1106_WriteStringAt(2, 26, "ADC:", Font_8H, SH1106_COLOR_WHITE);
+    SH1106_WriteStringAt(2, 38, "SPS:", Font_8H, SH1106_COLOR_WHITE);
+    SH1106_WriteStringAt(2, 50, "Div:", Font_8H, SH1106_COLOR_WHITE);
 
     SH1106_UpdateScreen();
 }
@@ -268,43 +302,69 @@ void Display_Init(void)
 void Display_Update(void)
 {
     /* Clear dynamic areas */
-    SH1106_FillRectangle(30, 12, 93, 8, SH1106_COLOR_BLACK);
-    SH1106_FillRectangle(22, 20, 101, 8, SH1106_COLOR_BLACK);
-    SH1106_FillRectangle(30, 28, 93, 8, SH1106_COLOR_BLACK);
-    SH1106_FillRectangle(35, 36, 88, 8, SH1106_COLOR_BLACK);
-    SH1106_FillRectangle(35, 44, 88, 8, SH1106_COLOR_BLACK);
-    SH1106_FillRectangle(30, 52, 93, 8, SH1106_COLOR_BLACK);
+    SH1106_FillRectangle(2, 14, 121, 48, SH1106_COLOR_BLACK);
 
-    /* Display ADC code */
-    snprintf(display_buf, sizeof(display_buf), "%ld", adc_code);
-    SH1106_WriteStringAt(30, 12, display_buf, Font_8H, SH1106_COLOR_WHITE);
-
-    /* Display voltage in millivolts */
-    if (voltage_mv > -1000.0f && voltage_mv < 1000.0f) {
-        snprintf(display_buf, sizeof(display_buf), "%.2f", voltage_mv);
+    /* Display weight in grams with 1 decimal */
+    if (tare_pressed) {
+        int32_t grams = weight_grams_x10 / 10;
+        int32_t decimal = weight_grams_x10 % 10;
+        if (decimal < 0) decimal = -decimal;
+        
+        snprintf(display_buf, sizeof(display_buf), "%ld.%ld g", grams, decimal);
     } else {
-        snprintf(display_buf, sizeof(display_buf), "OVR");
+        snprintf(display_buf, sizeof(display_buf), "TARE 1st");
     }
-    SH1106_WriteStringAt(22, 20, display_buf, Font_8H, SH1106_COLOR_WHITE);
+    SH1106_WriteStringAt(2, 14, display_buf, Font_8H, SH1106_COLOR_WHITE);
 
-    /* Display samples per second */
-    snprintf(display_buf, sizeof(display_buf), "%lu", samples_per_sec);
-    SH1106_WriteStringAt(30, 28, display_buf, Font_8H, SH1106_COLOR_WHITE);
+    /* Display RAW ADC */
+    snprintf(display_buf, sizeof(display_buf), "RAW: %ld", adc_raw);
+    SH1106_WriteStringAt(2, 24, display_buf, Font_8H, SH1106_COLOR_WHITE);
 
-    /* Display DRDY status */
-    const char *drdy_text = drdy_status ? "RDY" : "BSY";
-    SH1106_WriteStringAt(35, 36, drdy_text, Font_8H, SH1106_COLOR_WHITE);
+    /* Display ADC code (after tare) */
+    snprintf(display_buf, sizeof(display_buf), "ADC: %ld", adc_code);
+    SH1106_WriteStringAt(2, 34, display_buf, Font_8H, SH1106_COLOR_WHITE);
 
-    /* Display register values */
-    snprintf(display_buf, sizeof(display_buf), "%02X %02X %02X %02X",
-             reg_check[0], reg_check[1], reg_check[2], reg_check[3]);
-    SH1106_WriteStringAt(35, 44, display_buf, Font_8H, SH1106_COLOR_WHITE);
+    /* Display weight x10 for debug */
+    snprintf(display_buf, sizeof(display_buf), "x10: %ld", weight_grams_x10);
+    SH1106_WriteStringAt(2, 44, display_buf, Font_8H, SH1106_COLOR_WHITE);
 
-    /* Display init status */
-    const char *init_text = ads_init_ok ? "OK" : "FAIL";
-    SH1106_WriteStringAt(30, 52, init_text, Font_8H, SH1106_COLOR_WHITE);
+    /* Display divisor */
+    snprintf(display_buf, sizeof(display_buf), "DIV: %ld SPS:%lu", calibration_divisor, samples_per_sec);
+    SH1106_WriteStringAt(2, 54, display_buf, Font_8H, SH1106_COLOR_WHITE);
 
     SH1106_UpdateScreen();
+}
+
+static void adsCsLow(void)
+{
+    HAL_GPIO_WritePin(GPIOB, GPIO_PIN_0, GPIO_PIN_RESET);
+}
+
+static void adsCsHigh(void)
+{
+    HAL_GPIO_WritePin(GPIOB, GPIO_PIN_0, GPIO_PIN_SET);
+}
+
+static int adsSpiTxRx(const uint8_t *tx, uint8_t *rx, uint16_t len)
+{
+    HAL_StatusTypeDef st;
+    if (tx && rx) {
+        st = HAL_SPI_TransmitReceive(&hspi1, (uint8_t*)tx, rx, len, 100);
+    } else if (rx) {
+        static uint8_t zeros[256];
+        if (len > sizeof(zeros)) return -1;
+        st = HAL_SPI_TransmitReceive(&hspi1, zeros, rx, len, 100);
+    } else if (tx) {
+        st = HAL_SPI_Transmit(&hspi1, (uint8_t*)tx, len, 100);
+    } else {
+        return -1;
+    }
+    return (st == HAL_OK) ? 0 : -1;
+}
+
+static uint8_t adsDrdyRead(void)
+{
+    return HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_1) == GPIO_PIN_RESET;
 }
 
 /* USER CODE END 4 */

@@ -13,10 +13,12 @@ The system performs the following tasks:
 - Reads differential analog voltage from a load cell using the ADS1220.
 - Converts the 24 bit ADC result into a signed integer value.
 - Applies tare offset subtraction.
-- Scales the result using a calibration divisor.
-- Displays weight in grams with one decimal place.
-- Shows diagnostic information such as raw ADC value and samples per second.
-- Allows tare operation via a push button.
+- Scales the result using a calibration divisor to produce grams with one decimal place.
+- Displays weight and diagnostic information on an OLED display.
+- Shows the current operating mode permanently in the top bar of the display.
+- Allows tare via the Confirm button.
+- Allows live adjustment of the calibration divisor using a rotary encoder in Calibrate mode.
+- Saves and restores the calibration divisor to and from internal Flash memory.
 
 All weight calculations are performed using integer arithmetic. The variable weight_grams_x10 represents the weight in grams multiplied by ten.
 
@@ -46,8 +48,8 @@ Typical hardware components:
 - ADS1220 24 bit ADC connected via SPI.
 - Load cell in full bridge configuration.
 - SH1106 128x64 OLED display connected via I2C.
-- Push button for tare function.
-- Optional EC11 rotary encoder.
+- EC11 rotary encoder with push button.
+- Confirm button and Back button.
 
 ADS1220 key parameters used in this project:
 
@@ -61,28 +63,75 @@ ADS1220 key parameters used in this project:
 The following peripherals are used:
 
 GPIO:
-- Output for status LED.
-- Input with pull up for tare button.
-- Output for ADS1220 chip select.
-- Input for ADS1220 DRDY.
+- PC13: Output, status LED.
+- PB0: Output, ADS1220 chip select.
+- PB1: Input, ADS1220 DRDY.
+- PA2: Input with pull up, Encoder Push button.
+- PA3: Input with pull up, Confirm button.
+- PA4: Input with pull up, Back button.
 
 SPI1:
 - Master mode.
 - 8 bit data size.
-- Software controlled chip select.
+- Software controlled chip select via PB0.
 - Used for ADS1220 register access and data read.
 
 I2C1:
-- Fast mode, typically 400 kHz.
+- Fast mode, 400 kHz.
+- Pins: PB6 SCL, PB7 SDA.
 - Used for SH1106 OLED communication.
 
 TIM2:
-- Encoder interface mode if EC11 is used.
-- 16 bit counter.
+- Encoder interface mode for EC11.
+- 16 bit counter, period 65535.
+- Both channels rising edge, no prescaler, no filter.
 
 System clock:
-- External HSE oscillator.
-- PLL configured for high performance system clock.
+- External HSE crystal: 25 MHz.
+- PLL: PLLM 12, PLLN 96.
+- SYSCLK: 100 MHz.
+- APB1: 50 MHz, APB2: 100 MHz.
+
+## Operating Modes
+
+The firmware operates in two modes. The current mode is always visible in the top bar of the display, shown with an inverted white background.
+
+### Scale Mode
+
+This is the default mode after power on.
+
+- Confirm (PA3): stores the current raw ADC value as the tare offset. All subsequent weight readings are relative to this value.
+- Encoder Push (PA2): enters Calibrate mode. The current divisor is saved internally so it can be restored if the calibration is cancelled.
+- Encoder rotation: ignored in this mode.
+- Bottom display line shows: OK=tare  push=cal
+
+### Calibrate Mode
+
+Used to adjust the calibration divisor while observing the live weight reading.
+
+- Encoder rotation: changes calibration_divisor by one per detent. The displayed weight updates immediately.
+- Confirm (PA3): saves the current divisor to internal Flash and returns to Scale mode.
+- Back (PA4): discards all changes, restores the divisor that was active before entering Calibrate mode, and returns to Scale mode.
+- Bottom display line shows: OK=save  back=undo
+
+A brief notification message appears at the bottom of the screen after each action: Tared, Saved to Flash, or Cancelled.
+
+## Flash Persistent Storage
+
+The calibration divisor is stored in the last sector of internal Flash memory. The storage layout is a simple structure containing a magic number, the divisor value, and an XOR checksum for validation.
+
+On every power on, the firmware reads this sector. If the magic number and checksum are valid, the stored divisor is loaded automatically. If the sector is blank or corrupted, the firmware continues with the compiled default value.
+
+The Flash sector and base address must match your specific MCU:
+
+- STM32F401 and F411 (256 KB flash): FLASH_SECTOR_5 at address 0x08020000.
+- STM32F405 and F407 (1 MB flash): FLASH_SECTOR_7 at address 0x08060000.
+- STM32F446 (512 KB flash): FLASH_SECTOR_7 at address 0x08060000.
+
+These are defined at the top of main.c:
+
+    #define FLASH_STORAGE_SECTOR    FLASH_SECTOR_5
+    #define FLASH_STORAGE_ADDR      0x08020000U
 
 ## Measurement Principle
 
@@ -96,47 +145,46 @@ The firmware processes data as follows:
 
    weight_grams_x10 = (adc_code * 10) / calibration_divisor
 
-The calibration_divisor is determined experimentally by placing a known reference mass on the scale and adjusting until the displayed value matches the real weight.
+The calibration_divisor represents the number of ADC counts per gram. Integer arithmetic ensures deterministic execution time and avoids floating point overhead.
 
-Integer arithmetic ensures deterministic execution time and avoids floating point overhead.
+## Display Layout
 
-## Tare Function
+The 128x64 OLED display is fully redrawn each update cycle. The layout is fixed:
 
-The tare button is connected to a GPIO configured with pull up. When pressed, the current adc_raw value is stored in tare_offset.
+- Row 0 to 11: Mode bar. Inverted background, shows SCALE or CALIBRATE.
+- Row 13: Weight in grams with one decimal, or a tare prompt if tare has not been performed.
+- Row 23: Raw ADC value (adc_raw).
+- Row 33: Net ADC value after tare subtraction (adc_code).
+- Row 43: Current calibration divisor and samples per second.
+- Row 53: Context hint for current mode, or a temporary notification message.
 
-All subsequent measurements are calculated relative to this stored offset. Basic debounce is implemented using a short delay and state comparison.
+## Calibration Procedure
 
-## Display Handling
+1. Power on the system with no load on the scale.
+2. Press Confirm to tare.
+3. Place a known reference mass on the scale.
+4. Press Encoder Push to enter Calibrate mode.
+5. Rotate the encoder until the displayed weight matches the reference mass.
+6. Press Confirm to save the divisor to Flash and return to Scale mode.
 
-The SH1106 display driver is used in buffered mode. Static elements such as borders and labels are drawn once during initialization.
-
-Dynamic fields are updated periodically:
-
-- Weight in grams with one decimal.
-- Raw ADC value.
-- ADC value after tare.
-- Scaled x10 value.
-- Calibration divisor and samples per second.
-
-The update period is controlled by UPDATE_DELAY_MS.
+If the result is unsatisfactory, re enter Calibrate mode and adjust further. Press Back at any point to discard changes without saving.
 
 ## Sampling Rate Calculation
 
-Each successful ADC read increments sample_count. Once per second, the firmware copies sample_count into samples_per_sec and resets the counter.
-
-This provides a runtime indication of the effective sampling speed.
+Each successful ADC read increments sample_count. Once per second the firmware copies sample_count into samples_per_sec and resets the counter. This provides a runtime indication of the effective sampling speed, displayed on the screen.
 
 ## Main Loop Operation
 
 Inside the infinite loop:
 
-- Check if new ADC data is available.
-- Read and process measurement.
-- Update tare state if button pressed.
-- Compute samples per second.
-- Refresh display periodically.
+- Read and process ADC measurement if available.
+- Poll all three buttons for edge detection.
+- Read encoder delta.
+- Execute the state machine for the current mode.
+- Expire notification banners after 1.2 seconds.
+- Refresh the display every UPDATE_DELAY_MS milliseconds.
 
-The design avoids blocking delays except during initialization and debounce.
+The design avoids blocking delays except during initialization.
 
 ## Interaction Between Modules
 
@@ -150,86 +198,10 @@ The main application calls:
 
 Drivers do not directly depend on each other. All integration is handled in main.c.
 
-## Calibration Procedure
-
-1. Power on the system without load and press tare.
-2. Place a known reference mass on the scale.
-3. Observe weight_grams_x10 or displayed grams.
-4. Adjust calibration_divisor in firmware.
-5. Rebuild and flash until the displayed value matches the reference mass.
-
-## Detailed STM32CubeMX Configuration Used In This Project
-
-The following settings are taken directly from the provided CubeMX project file.
-
-Microcontroller and Clock
-
-- External crystal HSE: 25 MHz.
-- PLL Source: HSE.
-- PLLM: 12.
-- PLLN: 96.
-- PLLCLK Frequency: 100 MHz.
-- SYSCLK Source: PLLCLK.
-- SYSCLK Frequency: 100 MHz.
-- AHB Frequency: 100 MHz.
-- APB1 Prescaler: HCLK DIV2.
-- APB1 Frequency: 50 MHz.
-- APB2 Frequency: 100 MHz.
-
-GPIO Configuration
-
-- PC13: GPIO Output, used as status LED.
-- PB0: GPIO Output, high speed, initial state SET, used as ADS1220 chip select.
-- PB1: GPIO External Interrupt line 1, used as ADS1220 DRDY.
-- PA3: GPIO External Interrupt on falling edge with pull up, used as tare button.
-- PA4: GPIO External Interrupt on falling edge with pull up.
-
-SPI1 Configuration for ADS1220
-
-- Mode: Master.
-- Direction: 2 lines full duplex.
-- Clock Phase: 2nd edge.
-- Baud Rate Prescaler: 256.
-- Calculated SPI Speed: approximately 390.625 kbit per second.
-- Software controlled chip select via PB0.
-
-I2C1 Configuration for SH1106
-
-- Mode: I2C Fast Mode.
-- Pins: PB6 SCL, PB7 SDA.
-- Used for OLED display communication.
-
-TIM2 Configuration for EC11 Encoder
-
-- Encoder Mode: TI1 and TI2.
-- Period: 65535.
-- Auto Reload Preload: Enabled.
-- Clock Division: DIV1.
-- Input Capture 1 Polarity: Rising.
-- Input Capture 2 Polarity: Rising.
-- IC1 and IC2 Prescaler: DIV1.
-- IC1 and IC2 Filter: 0.
-
-Project Structure
-
-The initialization functions are generated by CubeMX in the following order:
-
-- SystemClock_Config.
-- MX_GPIO_Init.
-- MX_I2C1_Init.
-- MX_TIM2_Init.
-- MX_SPI1_Init.
-
-These settings ensure stable 100 MHz system operation, SPI communication with ADS1220 at a safe speed, fast I2C communication with the OLED, and hardware based quadrature decoding using TIM2.
-
 ## Possible Extensions
 
-- Moving average digital filtering.
-- Median filter for noise suppression.
+- Moving average or median filter for noise suppression.
 - Automatic multi point calibration.
-- EEPROM storage of calibration data.
-- Menu system using rotary encoder.
 - Overload detection and warning.
-
-This project provides a structured and modular foundation for building precision measurement systems on STM32 using high resolution ADC devices.
-
+- Adjustable encoder step size for faster coarse and slower fine divisor tuning.
+- Unit switching between grams and ounces.

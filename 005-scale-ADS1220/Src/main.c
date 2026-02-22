@@ -55,15 +55,18 @@
 #define BTN_PUSH_PORT       GPIOA
 #define BTN_PUSH_PIN        GPIO_PIN_2
 
-/* Flash */
+/* Flash storage configuration - adjust for your device */
 #define FLASH_STORAGE_SECTOR    FLASH_SECTOR_5      /* change if needed */
 #define FLASH_STORAGE_ADDR      0x08020000U         /* change if needed */
 #define FLASH_MAGIC             0xA55A1234U
 /* USER CODE END PD */
 
 /* USER CODE BEGIN PM */
-#define LED_TOGGLE()  HAL_GPIO_TogglePin(GPIOC, GPIO_PIN_13)
-#define BTN_PRESSED(port, pin)  (HAL_GPIO_ReadPin((port), (pin)) == GPIO_PIN_RESET)
+#define LED_TOGGLE()             HAL_GPIO_TogglePin(GPIOC, GPIO_PIN_13)
+/* helper: returns true if pin reads low (active-low button) */
+#define BTN_PRESSED(port, pin)   (HAL_GPIO_ReadPin((port), (pin)) == GPIO_PIN_RESET)
+#define ENC_READ()               ((uint16_t)(__HAL_TIM_GET_COUNTER(&htim2)))
+#define ENC_RESET()              (__HAL_TIM_SET_COUNTER(&htim2, 0))
 /* USER CODE END PM */
 
 /* USER CODE BEGIN PTD */
@@ -72,69 +75,87 @@ typedef enum {
     MODE_CALIBRATE,
 } AppMode_t;
 
+/* Structure stored in flash to persist calibration divisor */
 typedef struct {
     uint32_t magic;
     int32_t  calibration_divisor;
     uint32_t checksum;
 } FlashConfig_t;
 
-/* Simple debounced button — call every main loop iteration */
+/* Simple debounced button — call every main loop iteration
+   only basic edge detection implemented (sufficient for ~200 ms update loop) */
 typedef struct {
     GPIO_TypeDef *port;
     uint16_t      pin;
-    uint8_t       last_raw;     /* raw GPIO state last loop          */
-    uint8_t       pressed;      /* single-shot flag: just pressed    */
+    uint8_t       last_raw;     /* raw GPIO state last loop (1=idle,0=pressed) */
+    uint8_t       pressed;      /* single-shot flag: just pressed in this loop */
 } Button_t;
 /* USER CODE END PTD */
 
 /* USER CODE BEGIN PV */
+/* Hardware interface objects */
 ADS1220_Handle_t hads1220;
 EC11_Encoder_t   encoder;
 
-int32_t  adc_raw            = 0;
-int32_t  adc_code           = 0;
-int32_t  weight_grams_x10   = 0;
+/* Measurement variables */
+int32_t  adc_raw            = 0;   /* raw 24-bit ADC value from ADS1220 */
+int32_t  adc_code           = 0;   /* adc_raw - tare_offset */
+int32_t  weight_grams_x10   = 0;   /* grams * 10 (one decimal digit) */
 
+/* Simple moving average filter for displayed weight */
+#define FILTER_SIZE     8
+static int32_t  filter_buf[FILTER_SIZE];
+static uint8_t  filter_idx  = 0;
+static uint8_t  filter_full = 0;
+int32_t  weight_filtered    = 0;
+
+/* Timing / counters */
 uint32_t last_update        = 0;
 uint32_t sample_count       = 0;
 uint32_t samples_per_sec    = 0;
 uint32_t last_sps_time      = 0;
 
+/* ADS1220 init flag */
 uint8_t  ads_init_ok        = 0;
-uint8_t  reg_check[4]       = {0};
+
 char     display_buf[64];
 
-/* Scale */
+/* Scale settings */
 int32_t  tare_offset            = 0;
-int32_t  calibration_divisor    = 1724;
-int32_t  cal_divisor_backup     = 1724;  /* restored if Back is pressed */
+int32_t  calibration_divisor    = 1724; /* counts per gram (×10 internal) */
+int32_t  cal_divisor_backup     = 1724; /* temporary backup while editing */
 uint8_t  tare_pressed           = 0;
 
-/* Mode */
+/* Application mode */
 AppMode_t app_mode = MODE_SCALE;
 
-/* Buttons */
+/* Buttons instances (active-low) */
 Button_t btn_confirm = { BTN_CONFIRM_PORT, BTN_CONFIRM_PIN, 1, 0 };
 Button_t btn_back    = { BTN_BACK_PORT,    BTN_BACK_PIN,    1, 0 };
 Button_t btn_push    = { BTN_PUSH_PORT,    BTN_PUSH_PIN,    1, 0 };
 
-/* Encoder */
-int16_t  enc_prev_cnt = 0;
+/* Encoder: EC11 driver provides step/position fields */
 
-/* Notification banner */
-uint8_t  notify_msg[20]  = "";
+/* Notification banner (short message displayed at bottom) */
+char     notify_msg[20]  = "";
 uint32_t notify_time     = 0;
-#define  NOTIFY_DURATION_MS  1200
+#define  NOTIFY_DURATION_MS  200
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 
 /* USER CODE BEGIN PFP */
+/* Display update helper */
 void     Display_Update(void);
+
+/* show a short message on the bottom line, auto-expire after NOTIFY_DURATION_MS */
 void     Notify(const char *msg);
+
+/* poll a simple edge-detect button (active-low) */
 static void     Button_Poll(Button_t *b);
-static int32_t  Encoder_GetDelta(void);
+
+/* persistence helpers */
 static void     Flash_SaveConfig(void);
 static uint8_t  Flash_LoadConfig(void);
 static uint32_t Config_Checksum(const FlashConfig_t *c);
@@ -149,12 +170,22 @@ static uint8_t adsDrdyRead(void);
 
 /* ============================================================
  *  main
+ *  - initialize peripherals and drivers
+ *  - run simple main loop: sample ADC, process input, update UI
  * ============================================================ */
 int main(void)
 {
     HAL_Init();
 
     /* USER CODE BEGIN Init */
+    
+    CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+    ITM->LAR = 0xC5ACCE55;  
+    ITM->TCR = ITM_TCR_ITMENA_Msk | ITM_TCR_TSENA_Msk;
+    ITM->TER = 1;
+
+
+    /* provide platform callbacks to ADS1220 driver */
     hads1220.csLow    = adsCsLow;
     hads1220.csHigh   = adsCsHigh;
     hads1220.spiTxRx  = adsSpiTxRx;
@@ -171,108 +202,142 @@ int main(void)
     MX_SPI1_Init();
 
     /* USER CODE BEGIN 2 */
-    HAL_Delay(100);
+    HAL_Delay(100); /* allow supplies and sensors to settle */
 
+    /* initialize OLED; hang if display not present */
     if (SH1106_Init() != SH1106_OK) {
         while (1) { LED_TOGGLE(); HAL_Delay(200); }
     }
     SH1106_Fill(SH1106_COLOR_BLACK);
     SH1106_UpdateScreen();
 
+    /* encoder hardware + driver */
     EC11_Init(&encoder);
     HAL_TIM_Encoder_Start(&htim2, TIM_CHANNEL_ALL);
-    enc_prev_cnt = (int16_t)TIM2->CNT;
+    ENC_RESET();
 
+    /* initialize ADS1220 ADC */
     if (ADS1220_Init(&hads1220) == ADS1220_OK) {
         ads_init_ok   = 1;
-        hads1220.gain = 128;
+        hads1220.gain = 128; /* confirm gain */
     } else {
+        /* show error and halt */
         SH1106_WriteStringAt(10, 28, "ADS1220 INIT FAIL", Font_8H, SH1106_COLOR_WHITE);
         SH1106_UpdateScreen();
         while (1) { LED_TOGGLE(); HAL_Delay(500); }
     }
 
-    ADS1220_ReadRegister(&hads1220, 0, &reg_check[0]);
-    ADS1220_ReadRegister(&hads1220, 1, &reg_check[1]);
-    ADS1220_ReadRegister(&hads1220, 2, &reg_check[2]);
-    ADS1220_ReadRegister(&hads1220, 3, &reg_check[3]);
-
-    Flash_LoadConfig();   /* restore divisor; silently keeps default if blank */
+    /* restore previous calibration (if present) - silent fallback to defaults */
+    Flash_LoadConfig();
 
     last_update   = HAL_GetTick();
     last_sps_time = HAL_GetTick();
     /* USER CODE END 2 */
 
+    /* Main loop */
     while (1)
     {
         /* USER CODE BEGIN 3 */
         uint32_t now = HAL_GetTick();
 
-        /* ---- ADC ------------------------------------------------ */
+        /* ---- ADC sampling & basic processing ----
+         * Read raw ADC, subtract tare, compute weight (integer math)
+         * Apply lightweight moving average for display smoothing.
+         */
         if (ads_init_ok) {
             if (ADS1220_ReadData(&hads1220, &adc_raw) == ADS1220_OK) {
                 adc_code         = adc_raw - tare_offset;
                 weight_grams_x10 = (adc_code * 10) / calibration_divisor;
+
+                /* moving average buffer update */
+                filter_buf[filter_idx] = weight_grams_x10;
+                filter_idx = (filter_idx + 1) % FILTER_SIZE;
+                if (filter_idx == 0) filter_full = 1;
+
+                uint8_t  count = filter_full ? FILTER_SIZE : filter_idx;
+                int32_t  sum   = 0;
+                for (uint8_t i = 0; i < count; i++) sum += filter_buf[i];
+                weight_filtered = sum / (count ? count : 1);
+
                 sample_count++;
             }
         }
+
+        /* update samples per second every 1 second */
         if ((now - last_sps_time) >= 1000) {
             samples_per_sec = sample_count;
             sample_count    = 0;
             last_sps_time   = now;
         }
 
-        /* ---- Buttons -------------------------------------------- */
+        /* ---- Input processing: buttons and encoder ---- */
         Button_Poll(&btn_confirm);
         Button_Poll(&btn_back);
         Button_Poll(&btn_push);
 
-        /* ---- Encoder delta -------------------------------------- */
-        int32_t enc_delta = Encoder_GetDelta();
+        /* encoder delta calculation using EC11 helper (driver provides stable detent counts) */
+        int32_t enc_delta = 0;
+        {
+            int32_t diff = EC11_TimerDiff16(&encoder, ENC_READ());
+            if (diff != 0) {
+                int32_t before = encoder.step;
+                EC11_ProcessTicks(&encoder, diff);
+                enc_delta = encoder.step - before; /* logical detent steps */
+            }
+        }
 
-        /* ---- State machine -------------------------------------- */
+        /* ---- Application state machine ----
+         * SCALE: confirm = tare, push = enter calibrate
+         * CALIBRATE: encoder adjusts divisor live, confirm=save, back=undo
+         */
         switch (app_mode)
         {
         case MODE_SCALE:
             if (btn_confirm.pressed) {
+                /* store current raw as tare reference */
                 tare_offset  = adc_raw;
                 tare_pressed = 1;
                 Notify("Tared");
             }
             if (btn_push.pressed) {
-                cal_divisor_backup  = calibration_divisor; /* save for Back */
+                /* enter calibration; keep backup so Back can restore */
+                cal_divisor_backup = calibration_divisor;
                 app_mode = MODE_CALIBRATE;
+                Notify("CAL");
+                /* force immediate UI refresh */
+                last_update = 0;
             }
             /* encoder ignored in SCALE mode */
             break;
 
         case MODE_CALIBRATE:
-            /* Encoder rotates divisor live */
             if (enc_delta != 0) {
-                calibration_divisor += enc_delta;
-                if (calibration_divisor == 0) calibration_divisor = 1;
+                /* adjust divisor by detents (increase divisor -> less grams) */
+                calibration_divisor -= enc_delta;
+                if (calibration_divisor <= 0) calibration_divisor = 1;
+                /* indicate direction quickly */
+                Notify(enc_delta > 0 ? ">" : "<");
+                last_update = 0; /* immediate redraw to show feedback */
             }
-            /* Confirm → save to Flash, return */
             if (btn_confirm.pressed) {
-                Flash_SaveConfig();
+                Flash_SaveConfig(); /* persist new divisor */
                 app_mode = MODE_SCALE;
-                Notify("Saved to Flash");
+                Notify("Saved");
             }
-            /* Back → discard, restore old divisor, return */
             if (btn_back.pressed) {
-                calibration_divisor = cal_divisor_backup;
+                calibration_divisor = cal_divisor_backup; /* restore old value */
                 app_mode = MODE_SCALE;
-                Notify("Cancelled");
+                Notify("Canceled");
             }
             break;
         }
 
-        /* ---- Expire notification banner ------------------------- */
+        /* expire short notifications */
         if (notify_msg[0] && (now - notify_time) >= NOTIFY_DURATION_MS) {
             notify_msg[0] = '\0';
         }
 
-        /* ---- Periodic display ----------------------------------- */
+        /* ---- Periodic display refresh ---- */
         if ((now - last_update) >= UPDATE_DELAY_MS) {
             last_update = now;
             LED_TOGGLE();
@@ -285,22 +350,15 @@ int main(void)
 /* ============================================================
  *  Display
  *
- *  Layout (128 x 64):
- *  ┌──────────────────────────────┐  y=0
- *  │  [   SCALE   ] / [CALIBRATE]│  y=0..11  ← mode bar (inverted)
- *  ├──────────────────────────────┤  y=12
- *  │  Weight: xxx.x g             │  y=13
- *  │  RAW:  xxxxxxxxx             │  y=23
- *  │  ADC:  xxxxxxxxx             │  y=33
- *  │  DIV:  xxxxx  SPS:xxx        │  y=43
- *  │  <notification or hint>      │  y=53
- *  └──────────────────────────────┘
+ *  Top bar: current mode (inverted background)
+ *  Main area: weight, raw adc, net adc, divisor
+ *  Bottom: notification or help + SPS
  * ============================================================ */
 void Display_Update(void)
 {
     SH1106_Fill(SH1106_COLOR_BLACK);
 
-    /* ---- Mode bar (inverted background) ---- */
+    /* Mode bar: inverted background with centered text */
     SH1106_FillRectangle(0, 0, 127, 11, SH1106_COLOR_WHITE);
     if (app_mode == MODE_SCALE) {
         SH1106_WriteStringAt(26, 2, "   SCALE   ", Font_8H, SH1106_COLOR_BLACK);
@@ -308,76 +366,73 @@ void Display_Update(void)
         SH1106_WriteStringAt(14, 2, "  CALIBRATE  ", Font_8H, SH1106_COLOR_BLACK);
     }
 
-    /* ---- Weight ---- */
+    /* Weight line: show filtered value if tare performed */
     if (tare_pressed) {
-        int32_t g = weight_grams_x10 / 10;
-        int32_t d = (weight_grams_x10 < 0) ? -(weight_grams_x10 % 10)
-                                            :   weight_grams_x10 % 10;
+        int32_t g = weight_filtered / 10;
+        int32_t d = (weight_filtered < 0) ? -(weight_filtered % 10) : weight_filtered % 10;
         snprintf(display_buf, sizeof(display_buf), "Weight: %ld.%ld g", g, d);
     } else {
         snprintf(display_buf, sizeof(display_buf), "Weight: -- tare --");
     }
     SH1106_WriteStringAt(2, 13, display_buf, Font_8H, SH1106_COLOR_WHITE);
 
-    /* ---- Raw ADC ---- */
+    /* Raw ADC and net ADC */
     snprintf(display_buf, sizeof(display_buf), "RAW: %ld", adc_raw);
     SH1106_WriteStringAt(2, 23, display_buf, Font_8H, SH1106_COLOR_WHITE);
 
-    /* ---- Net ADC ---- */
     snprintf(display_buf, sizeof(display_buf), "ADC: %ld", adc_code);
     SH1106_WriteStringAt(2, 33, display_buf, Font_8H, SH1106_COLOR_WHITE);
 
-    /* ---- Divisor + SPS ---- */
-    snprintf(display_buf, sizeof(display_buf),
-             "DIV:%ld SPS:%lu", calibration_divisor, samples_per_sec);
+    /* Divisor display (calibration parameter) */
+    snprintf(display_buf, sizeof(display_buf), "DIV: %ld", calibration_divisor);
     SH1106_WriteStringAt(2, 43, display_buf, Font_8H, SH1106_COLOR_WHITE);
 
-    /* ---- Bottom line: notification OR context hint ---- */
+    /* Bottom line: either notification centered, or context hint + SPS */
     if (notify_msg[0]) {
-        SH1106_WriteStringAt(2, 53, (char *)notify_msg, Font_8H, SH1106_COLOR_WHITE);
+        uint8_t len = (uint8_t)strlen(notify_msg);
+        uint8_t x   = (128 - len * 8) / 2;
+        if (x > 127) x = 0;
+        SH1106_FillRectangle(0, 51, 127, 63, SH1106_COLOR_WHITE);
+        SH1106_WriteStringAt(x, 53, notify_msg, Font_8H, SH1106_COLOR_BLACK);
     } else if (app_mode == MODE_SCALE) {
-        SH1106_WriteStringAt(2, 53, "OK=tare  push=cal", Font_8H, SH1106_COLOR_WHITE);
+        snprintf(display_buf, sizeof(display_buf), "OK=tare push=cal %lu", samples_per_sec);
+        SH1106_WriteStringAt(2, 53, display_buf, Font_8H, SH1106_COLOR_WHITE);
     } else {
-        SH1106_WriteStringAt(2, 53, "OK=save  back=undo", Font_8H, SH1106_COLOR_WHITE);
+        snprintf(display_buf, sizeof(display_buf), "OK=save back=undo %lu", samples_per_sec);
+        SH1106_WriteStringAt(2, 53, display_buf, Font_8H, SH1106_COLOR_WHITE);
     }
 
     SH1106_UpdateScreen();
 }
 
+/* show a short centered message on the bottom line */
 void Notify(const char *msg)
 {
-    strncpy((char *)notify_msg, msg, sizeof(notify_msg) - 1);
+    strncpy(notify_msg, msg, sizeof(notify_msg) - 1);
     notify_msg[sizeof(notify_msg) - 1] = '\0';
     notify_time = HAL_GetTick();
 }
 
 /* ============================================================
- *  Button poll  (call every loop, active-low, no debounce timer
- *  needed at 200 Hz loop rate — just edge detection)
+ *  Button poll (edge detect)
+ *  - Active-low buttons.
+ *  - Simple edge detection suffices at ~200 ms update rate.
  * ============================================================ */
 static void Button_Poll(Button_t *b)
 {
     b->pressed      = 0;
-    uint8_t raw     = BTN_PRESSED(b->port, b->pin) ? 0 : 1; /* 0=pressed,1=idle */
-    if (raw == 0 && b->last_raw == 1) {                      /* falling edge */
+    /* raw logic: treat 0 when pressed, 1 when idle to simplify edge check */
+    uint8_t raw     = BTN_PRESSED(b->port, b->pin) ? 0 : 1;
+    if (raw == 0 && b->last_raw == 1) { /* falling edge: newly pressed */
         b->pressed = 1;
     }
     b->last_raw = raw;
 }
 
 /* ============================================================
- *  Encoder  (TIM2 encoder mode, 2 counts per detent)
- * ============================================================ */
-static int32_t Encoder_GetDelta(void)
-{
-    int16_t cnt   = (int16_t)TIM2->CNT;
-    int16_t delta = cnt - enc_prev_cnt;
-    enc_prev_cnt  = cnt;
-    return (int32_t)(delta / 2);
-}
-
-/* ============================================================
- *  Flash persistent storage
+ *  Flash persistence helpers
+ *  - store only a small FlashConfig_t containing magic/checksum/divisor
+ *  - caller must ensure sector/address match MCU layout
  * ============================================================ */
 static uint32_t Config_Checksum(const FlashConfig_t *c)
 {
@@ -393,15 +448,18 @@ static void Flash_SaveConfig(void)
 
     HAL_FLASH_Unlock();
 
+    /* erase one sector (Flash layout dependent) */
     FLASH_EraseInitTypeDef erase = {0};
     erase.TypeErase    = FLASH_TYPEERASE_SECTORS;
     erase.Sector       = FLASH_STORAGE_SECTOR;
     erase.NbSectors    = 1;
-    erase.VoltageRange = FLASH_VOLTAGE_RANGE_3;
+    erase.VoltageRange = FLASH_VOLTAGE_RANGE_3; /* 2.7V - 3.6V devices */
+
     uint32_t err = 0;
     HAL_FLASHEx_Erase(&erase, &err);
 
-    uint32_t  addr = FLASH_STORAGE_ADDR;
+    /* program words sequentially */
+    uint32_t addr  = FLASH_STORAGE_ADDR;
     uint32_t *data = (uint32_t *)&cfg;
     for (uint32_t i = 0; i < sizeof(FlashConfig_t) / 4; i++) {
         HAL_FLASH_Program(FLASH_TYPEPROGRAM_WORD, addr, data[i]);
@@ -411,6 +469,7 @@ static void Flash_SaveConfig(void)
     HAL_FLASH_Lock();
 }
 
+/* Load config from flash, return 1 if valid and applied, 0 otherwise */
 static uint8_t Flash_LoadConfig(void)
 {
     const FlashConfig_t *cfg = (const FlashConfig_t *)FLASH_STORAGE_ADDR;
@@ -422,7 +481,8 @@ static uint8_t Flash_LoadConfig(void)
 }
 
 /* ============================================================
- *  ADS1220 platform callbacks
+ *  ADS1220 platform callbacks (SPI + CS + DRDY)
+ *  - These adapt the ADS1220 driver to the HAL SPI + GPIOs used
  * ============================================================ */
 static void adsCsLow(void)  { HAL_GPIO_WritePin(GPIOB, GPIO_PIN_0, GPIO_PIN_RESET); }
 static void adsCsHigh(void) { HAL_GPIO_WritePin(GPIOB, GPIO_PIN_0, GPIO_PIN_SET);   }
@@ -444,13 +504,14 @@ static int adsSpiTxRx(const uint8_t *tx, uint8_t *rx, uint16_t len)
     return (st == HAL_OK) ? 0 : -1;
 }
 
+/* DRDY line is active-low on PB1 in the CubeMX configuration */
 static uint8_t adsDrdyRead(void)
 {
     return HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_1) == GPIO_PIN_RESET;
 }
 
 /* ============================================================
- *  System Clock
+ *  System Clock (CubeMX generated values retained)
  * ============================================================ */
 void SystemClock_Config(void)
 {

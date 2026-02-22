@@ -23,7 +23,8 @@
   *    [ SCALE  ] or [ CALIBRATE ]
   *
   * Flash sector — adjust for your MCU:
-  *   STM32F401/F411 (256 KB): FLASH_SECTOR_5  @ 0x08020000
+  *   STM32F401 (256 KB): FLASH_SECTOR_5  @ 0x08020000
+  *   STM32F411 (512 KB):   FLASH_SECTOR_7  @ 0x08060000
   *   STM32F405/F407 (1 MB):   FLASH_SECTOR_7  @ 0x08060000
   ******************************************************************************
   */
@@ -56,8 +57,8 @@
 #define BTN_PUSH_PIN        GPIO_PIN_2
 
 /* Flash storage configuration - adjust for your device */
-#define FLASH_STORAGE_SECTOR    FLASH_SECTOR_5      /* change if needed */
-#define FLASH_STORAGE_ADDR      0x08020000U         /* change if needed */
+#define FLASH_STORAGE_SECTOR    FLASH_SECTOR_7
+#define FLASH_STORAGE_ADDR      0x08060000U
 #define FLASH_MAGIC             0xA55A1234U
 /* USER CODE END PD */
 

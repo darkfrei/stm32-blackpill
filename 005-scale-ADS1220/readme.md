@@ -124,8 +124,9 @@ On every power on, the firmware reads this sector. If the magic number and check
 
 The Flash sector and base address must match your specific MCU:
 
-- STM32F401 and F411 (256 KB flash): FLASH_SECTOR_5 at address 0x08020000.
+- STM32F401: FLASH_SECTOR_5 at address 0x08020000.
 - STM32F405 and F407 (1 MB flash): FLASH_SECTOR_7 at address 0x08060000.
+- STM32F411 (512 KB Flash): FLASH_SECTOR_7 at address 0x08060000.
 - STM32F446 (512 KB flash): FLASH_SECTOR_7 at address 0x08060000.
 
 These are defined at the top of main.c:

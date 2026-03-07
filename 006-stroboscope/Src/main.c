@@ -5,27 +5,30 @@
   * @brief   006-stroboscope — STM32F411 BlackPill
   *
   * TIM1_CH1 (PA8) — LED brightness PWM, 10 kHz
-  * TIM2           — EC11 rotary encoder
+  * TIM2           — EC11 rotary encoder (PA0/PA1)
   * TIM3           — strobe timer, Update + CC1 interrupts
-  * I2C1           — SH1106 display
+  * I2C1           — SH1106 display (PB6/PB7)
+  * PB1  EXTI1     — encoder push button → save settings to Flash
   *
-  * Frequency control — two modes:
-  *   HZ mode     : 10–100 Hz,  step 1 Hz
-  *   PERIOD mode : 150ms–6500ms, step 50ms  (below 10 Hz)
-  *     display shows period (ms or s) + calculated Hz
-  *     TIM3 tick = 0.1 ms → max ARR = 64999 @ 6500 ms (fits 16-bit)
+  * Frequency — two modes:
+  *   HZ mode     : 10–100 Hz, step 1 Hz
+  *   PERIOD mode : 150–6500 ms, step 50 ms  (below 10 Hz)
   *
-  * Duty cycle control — two modes:
-  *   PCT mode : 5–50%, step 1%
-  *   DIV mode : 1/N, N = 25–200, step 5
+  * Duty cycle — two modes:
+  *   PERC mode : 5–50%, step 1%
+  *   DIV mode  : 1/N, N=25–200, step 5
   *   Display always shows both: "X% 1/N"
   *
-  * Apply strategy:
-  *   Freq change   → Strobe_ApplyFreq()  — full stop/recalc/restart
-  *   Duty change   → Strobe_ApplyDuty()  — CCR only, no counter reset
-  *   Bright change → nothing (g_bright read live in TIM3 ISR)
+  * Brightness — two modes:
+  *   PERC mode : 10–100%, step 1%
+  *   DIV mode  : 1/N, N=10–200, step 1
+  *   Display always shows both: "X% 1/N"
   *
-  * NOTE: TIM3_IRQHandler is defined here.
+  * Flash storage (sector 7, 0x08060000, 128 KB):
+  *   Encoder push button saves current settings.
+  *   On power-on, saved settings are restored if checksum is valid.
+  *
+  * NOTE: TIM3_IRQHandler is defined here (USER CODE 0).
   * In stm32f4xx_it.c comment out the body of TIM3_IRQHandler:
   *   void TIM3_IRQHandler(void)
   *   {
@@ -35,6 +38,7 @@
   */
 /* USER CODE END Header */
 
+/* Includes ------------------------------------------------------------------*/
 #include "main.h"
 #include "i2c.h"
 #include "tim.h"
@@ -48,68 +52,12 @@
 #include "EC11.h"
 /* USER CODE END Includes */
 
-/* USER CODE BEGIN PD */
-#define UPDATE_DELAY_MS      100
-
-/* Buttons */
-#define BTN1_PORT  GPIOA
-#define BTN1_PIN   GPIO_PIN_2   /* parameter select */
-#define BTN2_PORT  GPIOA
-#define BTN2_PIN   GPIO_PIN_3   /* strobe on / off  */
-#define BTN3_PORT  GPIOA
-#define BTN3_PIN   GPIO_PIN_4   /* reset to default */
-
-/* Frequency — Hz mode */
-#define FREQ_HZ_MIN         10u
-#define FREQ_HZ_MAX        100u
-#define FREQ_HZ_INIT        30u
-
-/* Frequency — period mode (steps of 50 ms, i.e. 0.05 s)
- * step=3  → 150 ms  → 6.67 Hz  (just below 10 Hz boundary)
- * step=130 → 6500 ms → 0.15 Hz  (≈ 6.5 s, ARR = 64999, fits 16-bit) */
-#define PERIOD_STEP_MS      50u
-#define PERIOD_STEPS_MIN     3u   /* 150 ms */
-#define PERIOD_STEPS_MAX   130u   /* 6500 ms */
-#define PERIOD_STEPS_INIT    3u
-
-/* Duty — percent mode */
-#define DUTY_PCT_MIN         5u
-#define DUTY_PCT_MAX        50u
-#define DUTY_PCT_INIT        5u
-
-/* Duty — divisor mode: 1/N */
-#define DUTY_DIV_MIN        25u
-#define DUTY_DIV_MAX       200u
-#define DUTY_DIV_STEP        5u
-
-/* Brightness */
-#define STROBE_BRIGHT_MIN   10u
-#define STROBE_BRIGHT_MAX  100u
-#define STROBE_BRIGHT_INIT  75u
-
-/* TIM1: PSC=9, ARR=999 → 10 kHz PWM */
-#define TIM1_PWM_ARR       999u
-
-/* TIM3: PSC=9999 → tick = 0.1 ms, f_count = 10 kHz */
-#define TIM3_TICK_FREQ   10000u   /* ticks per second */
-#define TIM3_TICK_US       100u   /* one tick = 100 µs = 0.1 ms */
-/* USER CODE END PD */
-
-/* USER CODE BEGIN PM */
-#define LED_TOGGLE()           HAL_GPIO_TogglePin(GPIOC, GPIO_PIN_13)
-#define BTN_PRESSED(port, pin) (HAL_GPIO_ReadPin((port),(pin)) == GPIO_PIN_RESET)
-#define ENC_READ()             ((uint16_t)(__HAL_TIM_GET_COUNTER(&htim2)))
-#define ENC_RESET()            (__HAL_TIM_SET_COUNTER(&htim2, 0))
-/* USER CODE END PM */
-
+/* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
 typedef enum { ADJ_FREQ = 0, ADJ_DUTY, ADJ_BRIGHT, ADJ_COUNT } AdjMode_t;
-
-/* Frequency mode */
-typedef enum { FREQ_MODE_HZ = 0, FREQ_MODE_PERIOD } FreqMode_t;
-
-/* Duty mode */
-typedef enum { DUTY_MODE_PCT = 0, DUTY_MODE_DIV } DutyMode_t;
+typedef enum { FREQ_MODE_HZ = 0, FREQ_MODE_PERIOD }            FreqMode_t;
+typedef enum { DUTY_MODE_PERC = 0, DUTY_MODE_DIV }             DutyMode_t;
+typedef enum { BRIG_MODE_PERC = 0, BRIG_MODE_DIV }             BrigMode_t;
 
 typedef struct {
     GPIO_TypeDef *port;
@@ -118,8 +66,94 @@ typedef struct {
     uint8_t       pressed;
     uint32_t      last_time;
 } Button_t;
+
+/* Settings saved to Flash */
+typedef struct {
+    uint32_t  magic;          /* 0xSTR0B006 — identifies valid data     */
+    uint8_t   freq_mode;      /* FreqMode_t                              */
+    uint32_t  freq_hz;
+    uint32_t  period_steps;
+    uint8_t   duty_mode;      /* DutyMode_t                              */
+    uint32_t  duty_val;
+    uint8_t   brig_mode;      /* BrigMode_t                              */
+    uint32_t  brig_val;
+    uint8_t   running;
+    uint32_t  checksum;       /* simple XOR of all preceding bytes       */
+} FlashConfig_t;
 /* USER CODE END PTD */
 
+/* Private define ------------------------------------------------------------*/
+/* USER CODE BEGIN PD */
+#define UPDATE_DELAY_MS      100
+
+/* Buttons
+ * BTN1 = encoder push (PA2): cycle parameter + save to Flash
+ * BTN2 = PA3 : strobe on / off
+ * BTN3 = PA4 : reset to defaults */
+#define BTN1_PORT  GPIOA
+#define BTN1_PIN   GPIO_PIN_2
+#define BTN2_PORT  GPIOA
+#define BTN2_PIN   GPIO_PIN_3
+#define BTN3_PORT  GPIOA
+#define BTN3_PIN   GPIO_PIN_4
+
+/* Frequency — Hz mode */
+#define FREQ_HZ_MIN          10u
+#define FREQ_HZ_MAX         100u
+#define FREQ_HZ_INIT         30u
+
+/* Frequency — period mode (steps of 50 ms)
+ * step 3   = 150 ms  = 6.67 Hz
+ * step 130 = 6500 ms = 0.15 Hz   ARR = 64999, fits 16-bit */
+#define PERIOD_STEP_MS        50u
+#define PERIOD_STEPS_MIN       3u
+#define PERIOD_STEPS_MAX     130u
+#define PERIOD_STEPS_INIT      3u
+
+/* Duty — percent mode */
+#define DUTY_PERC_MIN          5u
+#define DUTY_PERC_MAX         50u
+#define DUTY_PERC_INIT         5u
+
+/* Duty — divisor mode 1/N */
+#define DUTY_DIV_MIN          25u
+#define DUTY_DIV_MAX         200u
+#define DUTY_DIV_STEP          5u
+
+/* Brightness — percent mode */
+#define BRIG_PERC_MIN         10u
+#define BRIG_PERC_MAX        100u
+#define BRIG_PERC_INIT        75u
+
+/* Brightness — divisor mode 1/N */
+#define BRIG_DIV_MIN          10u
+#define BRIG_DIV_MAX         200u
+#define BRIG_DIV_STEP          1u
+
+/* TIM1: PSC=9, ARR=999 → 10 kHz PWM */
+#define TIM1_PWM_ARR         999u
+
+/* TIM3: PSC=9999 → tick = 0.1 ms, f_count = 10 kHz */
+#define TIM3_TICK_FREQ     10000u
+
+/* Flash: last sector of STM32F411CE (512 KB) */
+#define FLASH_CONFIG_SECTOR  FLASH_SECTOR_7
+#define FLASH_CONFIG_ADDR    0x08060000UL
+#define FLASH_CONFIG_MAGIC   0x5752B006UL   /* "STR0B006" encoded */
+
+/* Save notification duration */
+#define NOTIFY_DURATION_MS   600u
+/* USER CODE END PD */
+
+/* Private macro -------------------------------------------------------------*/
+/* USER CODE BEGIN PM */
+#define LED_TOGGLE()           HAL_GPIO_TogglePin(GPIOC, GPIO_PIN_13)
+#define BTN_PRESSED(port, pin) (HAL_GPIO_ReadPin((port),(pin)) == GPIO_PIN_RESET)
+#define ENC_READ()             ((uint16_t)(__HAL_TIM_GET_COUNTER(&htim2)))
+#define ENC_RESET()            (__HAL_TIM_SET_COUNTER(&htim2, 0))
+/* USER CODE END PM */
+
+/* Private variables ---------------------------------------------------------*/
 /* USER CODE BEGIN PV */
 extern TIM_HandleTypeDef htim1;
 extern TIM_HandleTypeDef htim2;
@@ -130,195 +164,204 @@ EC11_Encoder_t encoder;
 
 /* Frequency state */
 static FreqMode_t g_freq_mode    = FREQ_MODE_HZ;
-static uint32_t   g_freq_hz      = FREQ_HZ_INIT;     /* used in HZ mode     */
-static uint32_t   g_period_steps = PERIOD_STEPS_INIT; /* used in PERIOD mode */
+static uint32_t   g_freq_hz      = FREQ_HZ_INIT;
+static uint32_t   g_period_steps = PERIOD_STEPS_INIT;
 
-/* Duty state
- *   DUTY_MODE_PCT : g_duty_val = percent  (5..50)
- *   DUTY_MODE_DIV : g_duty_val = N in 1/N (25..200, step 5) */
-static DutyMode_t g_duty_mode = DUTY_MODE_PCT;
-static uint32_t   g_duty_val  = DUTY_PCT_INIT;
+/* Duty state */
+static DutyMode_t g_duty_mode = DUTY_MODE_PERC;
+static uint32_t   g_duty_val  = DUTY_PERC_INIT;
 
-/* Brightness and run state */
-static uint32_t   g_bright  = STROBE_BRIGHT_INIT;
+/* Brightness state */
+static BrigMode_t g_brig_mode = BRIG_MODE_PERC;
+static uint32_t   g_brig_val  = BRIG_PERC_INIT;
+
 static uint8_t    g_running = 1;
 static AdjMode_t  g_adj     = ADJ_FREQ;
 
 /* Buttons */
-static Button_t btn1 = { BTN1_PORT, BTN1_PIN, 1, 0, 0 };
+static Button_t btn1     = { BTN1_PORT,    BTN1_PIN,    1, 0, 0 };
 static Button_t btn2 = { BTN2_PORT, BTN2_PIN, 1, 0, 0 };
 static Button_t btn3 = { BTN3_PORT, BTN3_PIN, 1, 0, 0 };
+
+/* Notification — notify_time init to far past so it never fires at startup */
+static char     notify_msg[12]   = "";
+static uint32_t notify_time      = (uint32_t)(-NOTIFY_DURATION_MS - 1u);
 
 static uint32_t last_display_tick = 0;
 static char     disp_buf[32];
 /* USER CODE END PV */
 
+/* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 
 /* USER CODE BEGIN PFP */
-static uint32_t Strobe_GetARR(void);
-static void     Strobe_ApplyFreq(void);
-static void     Strobe_ApplyDuty(void);
-static void     Strobe_SetRunning(uint8_t on);
-static uint32_t Duty_GetCCR(uint32_t arr);
-static uint32_t Duty_GetPct(void);
-static uint32_t Duty_GetDivisor(void);
-static void     Duty_Increase(void);
-static void     Duty_Decrease(void);
-static void     Freq_Increase(void);
-static void     Freq_Decrease(void);
-static void     Button_Poll(Button_t *b);
-static void     Encoder_Process(void);
-static void     Display_Update(void);
-static inline uint32_t Bright_CCR(uint32_t pct);
+static uint32_t  Strobe_GetARR(void);
+static void      Strobe_ApplyFreq(void);
+static void      Strobe_ApplyDuty(void);
+static void      Strobe_SetRunning(uint8_t on);
+static uint32_t  Duty_GetCCR(uint32_t arr);
+static uint32_t  Duty_GetPerc(void);
+static uint32_t  Duty_GetDivisor(void);
+static void      Duty_Increase(void);
+static void      Duty_Decrease(void);
+static uint32_t  Brig_GetCCR(void);
+static uint32_t  Brig_GetPerc(void);
+static uint32_t  Brig_GetDivisor(void);
+static void      Brig_Increase(void);
+static void      Brig_Decrease(void);
+static void      Freq_Increase(void);
+static void      Freq_Decrease(void);
+static void      Button_Poll(Button_t *b);
+static void      Encoder_Process(void);
+static void      Display_Update(void);
+static uint32_t  Config_Checksum(const FlashConfig_t *c);
+static void      Flash_SaveConfig(void);
+static void      Flash_LoadConfig(void);
+static void      Notify(const char *msg);
 /* USER CODE END PFP */
 
 /* USER CODE BEGIN 0 */
 
-/* ── Brightness: percent → TIM1 CCR1 ────────────────────────────────────── */
-static inline uint32_t Bright_CCR(uint32_t pct)
+/* ── Brightness helpers ───────────────────────────────────────────────────── */
+static uint32_t Brig_GetPerc(void)
 {
-    return ((TIM1_PWM_ARR + 1u) * pct) / 100u;
+    if (g_brig_mode == BRIG_MODE_PERC) return g_brig_val;
+    return (100u + g_brig_val / 2u) / g_brig_val;
 }
 
-/* ── TIM3 ARR from current frequency/period state ────────────────────────── */
-static uint32_t Strobe_GetARR(void)
+static uint32_t Brig_GetDivisor(void)
 {
-    if (g_freq_mode == FREQ_MODE_HZ) {
-        /* Hz mode: ARR = ticks_per_second / freq - 1 */
-        return (TIM3_TICK_FREQ / g_freq_hz) - 1u;
+    if (g_brig_mode == BRIG_MODE_DIV) return g_brig_val;
+    return (100u + g_brig_val / 2u) / g_brig_val;
+}
+
+static uint32_t Brig_GetCCR(void)
+{
+    uint32_t ccr;
+    if (g_brig_mode == BRIG_MODE_PERC) {
+        /* Percent mode: CCR = 1000 * pct / 100 */
+        ccr = ((TIM1_PWM_ARR + 1u) * g_brig_val) / 100u;
     } else {
-        /* Period mode: period_ms * 10 ticks/ms - 1
-         * tick = 0.1 ms → 10 ticks per ms */
-        return (g_period_steps * PERIOD_STEP_MS * 10u) - 1u;
+        /* Divisor mode: CCR = 1000 / N  — calculated directly to preserve
+         * resolution lost when converting 1/N to percent first.
+         * Example: N=100 → CCR=10, N=200 → CCR=5  (would both be 1% otherwise) */
+        ccr = (TIM1_PWM_ARR + 1u) / g_brig_val;
+    }
+    if (ccr == 0u) ccr = 1u;
+    return ccr;
+}
+
+static void Brig_Increase(void)
+{
+    if (g_brig_mode == BRIG_MODE_DIV) {
+        if (g_brig_val > BRIG_DIV_MIN) g_brig_val -= BRIG_DIV_STEP;
+        else { g_brig_mode = BRIG_MODE_PERC; g_brig_val = BRIG_PERC_MIN; }
+    } else {
+        if (g_brig_val < BRIG_PERC_MAX) g_brig_val++;
+    }
+}
+
+static void Brig_Decrease(void)
+{
+    if (g_brig_mode == BRIG_MODE_PERC) {
+        if (g_brig_val > BRIG_PERC_MIN) g_brig_val--;
+        else { g_brig_mode = BRIG_MODE_DIV; g_brig_val = BRIG_DIV_MIN; }
+    } else {
+        if (g_brig_val < BRIG_DIV_MAX) g_brig_val += BRIG_DIV_STEP;
     }
 }
 
 /* ── Duty helpers ─────────────────────────────────────────────────────────── */
-
-/* Always returns duty as integer percent (for display) */
-static uint32_t Duty_GetPct(void)
+static uint32_t Duty_GetPerc(void)
 {
-    if (g_duty_mode == DUTY_MODE_PCT)
-        return g_duty_val;
-    /* DIV mode: round(100 / N) */
+    if (g_duty_mode == DUTY_MODE_PERC) return g_duty_val;
     return (100u + g_duty_val / 2u) / g_duty_val;
 }
 
-/* Always returns 1/N divisor (for display) */
 static uint32_t Duty_GetDivisor(void)
 {
-    if (g_duty_mode == DUTY_MODE_DIV)
-        return g_duty_val;
-    /* PCT mode: round(100 / pct) */
+    if (g_duty_mode == DUTY_MODE_DIV) return g_duty_val;
     return (100u + g_duty_val / 2u) / g_duty_val;
 }
 
-/* TIM3 CCR1 from current duty state */
 static uint32_t Duty_GetCCR(uint32_t arr)
 {
-    uint32_t ccr;
-    if (g_duty_mode == DUTY_MODE_PCT)
-        ccr = ((arr + 1u) * g_duty_val) / 100u;
-    else
-        ccr = (arr + 1u) / g_duty_val;
+    uint32_t ccr = (g_duty_mode == DUTY_MODE_PERC)
+                   ? ((arr + 1u) * g_duty_val) / 100u
+                   : (arr + 1u) / g_duty_val;
     if (ccr == 0u) ccr = 1u;
     if (ccr > arr) ccr = arr;
     return ccr;
 }
 
-/* ── Duty navigation ──────────────────────────────────────────────────────── */
-
 static void Duty_Increase(void)
 {
     if (g_duty_mode == DUTY_MODE_DIV) {
-        if (g_duty_val > DUTY_DIV_MIN)
-            g_duty_val -= DUTY_DIV_STEP;
-        else {
-            g_duty_mode = DUTY_MODE_PCT;
-            g_duty_val  = DUTY_PCT_MIN;   /* cross to 5% */
-        }
+        if (g_duty_val > DUTY_DIV_MIN) g_duty_val -= DUTY_DIV_STEP;
+        else { g_duty_mode = DUTY_MODE_PERC; g_duty_val = DUTY_PERC_MIN; }
     } else {
-        if (g_duty_val < DUTY_PCT_MAX)
-            g_duty_val++;
+        if (g_duty_val < DUTY_PERC_MAX) g_duty_val++;
     }
 }
 
 static void Duty_Decrease(void)
 {
-    if (g_duty_mode == DUTY_MODE_PCT) {
-        if (g_duty_val > DUTY_PCT_MIN)
-            g_duty_val--;
-        else {
-            g_duty_mode = DUTY_MODE_DIV;
-            g_duty_val  = DUTY_DIV_MIN;   /* cross to 1/25 */
-        }
+    if (g_duty_mode == DUTY_MODE_PERC) {
+        if (g_duty_val > DUTY_PERC_MIN) g_duty_val--;
+        else { g_duty_mode = DUTY_MODE_DIV; g_duty_val = DUTY_DIV_MIN; }
     } else {
-        if (g_duty_val < DUTY_DIV_MAX)
-            g_duty_val += DUTY_DIV_STEP;
+        if (g_duty_val < DUTY_DIV_MAX) g_duty_val += DUTY_DIV_STEP;
     }
 }
 
-/* ── Frequency navigation ─────────────────────────────────────────────────── */
+/* ── Frequency helpers ────────────────────────────────────────────────────── */
+static uint32_t Strobe_GetARR(void)
+{
+    if (g_freq_mode == FREQ_MODE_HZ)
+        return (TIM3_TICK_FREQ / g_freq_hz) - 1u;
+    return (g_period_steps * PERIOD_STEP_MS * 10u) - 1u;
+}
 
 static void Freq_Increase(void)
 {
     if (g_freq_mode == FREQ_MODE_PERIOD) {
-        if (g_period_steps > PERIOD_STEPS_MIN)
-            g_period_steps--;
-        else {
-            /* cross boundary: switch to Hz mode at 10 Hz */
-            g_freq_mode = FREQ_MODE_HZ;
-            g_freq_hz   = FREQ_HZ_MIN;
-        }
+        if (g_period_steps > PERIOD_STEPS_MIN) g_period_steps--;
+        else { g_freq_mode = FREQ_MODE_HZ; g_freq_hz = FREQ_HZ_MIN; }
     } else {
-        if (g_freq_hz < FREQ_HZ_MAX)
-            g_freq_hz++;
+        if (g_freq_hz < FREQ_HZ_MAX) g_freq_hz++;
     }
 }
 
 static void Freq_Decrease(void)
 {
     if (g_freq_mode == FREQ_MODE_HZ) {
-        if (g_freq_hz > FREQ_HZ_MIN)
-            g_freq_hz--;
-        else {
-            /* cross boundary: switch to period mode at 150 ms */
-            g_freq_mode    = FREQ_MODE_PERIOD;
-            g_period_steps = PERIOD_STEPS_MIN;
-        }
+        if (g_freq_hz > FREQ_HZ_MIN) g_freq_hz--;
+        else { g_freq_mode = FREQ_MODE_PERIOD; g_period_steps = PERIOD_STEPS_MIN; }
     } else {
-        if (g_period_steps < PERIOD_STEPS_MAX)
-            g_period_steps++;
+        if (g_period_steps < PERIOD_STEPS_MAX) g_period_steps++;
     }
 }
 
-/* ── Apply frequency change: full TIM3 stop / reconfigure / restart ──────── */
+/* ── Strobe apply ─────────────────────────────────────────────────────────── */
 static void Strobe_ApplyFreq(void)
 {
     uint32_t arr = Strobe_GetARR();
     uint32_t ccr = Duty_GetCCR(arr);
-
     HAL_TIM_Base_Stop_IT(&htim3);
     __HAL_TIM_DISABLE_IT(&htim3, TIM_IT_CC1);
     __HAL_TIM_SET_AUTORELOAD(&htim3, arr);
     __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, ccr);
     __HAL_TIM_SET_COUNTER(&htim3, 0u);
     __HAL_TIM_CLEAR_FLAG(&htim3, TIM_FLAG_UPDATE | TIM_FLAG_CC1);
-
-    if (g_running)
-        HAL_TIM_Base_Start_IT(&htim3);
+    if (g_running) HAL_TIM_Base_Start_IT(&htim3);
 }
 
-/* ── Apply duty change: update CCR only, no counter reset ───────────────── */
 static void Strobe_ApplyDuty(void)
 {
     uint32_t arr = __HAL_TIM_GET_AUTORELOAD(&htim3);
-    uint32_t ccr = Duty_GetCCR(arr);
-    __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, ccr);
+    __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, Duty_GetCCR(arr));
 }
 
-/* ── Turn strobe on / off ─────────────────────────────────────────────────── */
 static void Strobe_SetRunning(uint8_t on)
 {
     g_running = on;
@@ -333,18 +376,98 @@ static void Strobe_SetRunning(uint8_t on)
     }
 }
 
-/* ── Poll button with debounce ────────────────────────────────────────────── */
+/* ── Flash config ─────────────────────────────────────────────────────────── */
+
+/* Simple XOR checksum over all fields except checksum itself */
+static uint32_t Config_Checksum(const FlashConfig_t *c)
+{
+    const uint8_t *p   = (const uint8_t *)c;
+    uint32_t       len = sizeof(FlashConfig_t) - sizeof(uint32_t);
+    uint32_t       crc = 0u;
+    for (uint32_t i = 0u; i < len; i++) crc ^= (uint32_t)p[i];
+    return crc;
+}
+
+static void Flash_SaveConfig(void)
+{
+    FlashConfig_t cfg;
+    cfg.magic        = FLASH_CONFIG_MAGIC;
+    cfg.freq_mode    = (uint8_t)g_freq_mode;
+    cfg.freq_hz      = g_freq_hz;
+    cfg.period_steps = g_period_steps;
+    cfg.duty_mode    = (uint8_t)g_duty_mode;
+    cfg.duty_val     = g_duty_val;
+    cfg.brig_mode    = (uint8_t)g_brig_mode;
+    cfg.brig_val     = g_brig_val;
+    cfg.running      = g_running;
+    cfg.checksum     = Config_Checksum(&cfg);
+
+    HAL_FLASH_Unlock();
+
+    /* Erase sector 7 */
+    FLASH_EraseInitTypeDef erase = {
+        .TypeErase    = FLASH_TYPEERASE_SECTORS,
+        .Sector       = FLASH_CONFIG_SECTOR,
+        .NbSectors    = 1,
+        .VoltageRange = FLASH_VOLTAGE_RANGE_3
+    };
+    uint32_t sector_error = 0u;
+    HAL_FLASHEx_Erase(&erase, &sector_error);
+
+    /* Write word by word */
+    const uint32_t *src  = (const uint32_t *)&cfg;
+    uint32_t        addr = FLASH_CONFIG_ADDR;
+    for (uint32_t i = 0u; i < sizeof(FlashConfig_t) / 4u; i++) {
+        HAL_FLASH_Program(FLASH_TYPEPROGRAM_WORD, addr, src[i]);
+        addr += 4u;
+    }
+
+    HAL_FLASH_Lock();
+}
+
+static void Flash_LoadConfig(void)
+{
+    const FlashConfig_t *cfg = (const FlashConfig_t *)FLASH_CONFIG_ADDR;
+
+    /* Validate magic and checksum */
+    if (cfg->magic    != FLASH_CONFIG_MAGIC)    return;
+    if (cfg->checksum != Config_Checksum(cfg))  return;
+
+    g_freq_mode    = (FreqMode_t)cfg->freq_mode;
+    g_freq_hz      = cfg->freq_hz;
+    g_period_steps = cfg->period_steps;
+    g_duty_mode    = (DutyMode_t)cfg->duty_mode;
+    g_duty_val     = cfg->duty_val;
+    g_brig_mode    = (BrigMode_t)cfg->brig_mode;
+    g_brig_val     = cfg->brig_val;
+    g_running      = cfg->running;
+
+    /* Clamp values to safe ranges in case flash is stale */
+    if (g_freq_hz      < FREQ_HZ_MIN)       g_freq_hz      = FREQ_HZ_INIT;
+    if (g_freq_hz      > FREQ_HZ_MAX)       g_freq_hz      = FREQ_HZ_MAX;
+    if (g_period_steps < PERIOD_STEPS_MIN)  g_period_steps = PERIOD_STEPS_MIN;
+    if (g_period_steps > PERIOD_STEPS_MAX)  g_period_steps = PERIOD_STEPS_MAX;
+    if (g_duty_val     == 0u)               g_duty_val     = DUTY_PERC_INIT;
+    if (g_brig_val     == 0u)               g_brig_val     = BRIG_PERC_INIT;
+}
+
+/* ── Notification ─────────────────────────────────────────────────────────── */
+static void Notify(const char *msg)
+{
+    strncpy(notify_msg, msg, sizeof(notify_msg) - 1u);
+    notify_msg[sizeof(notify_msg) - 1u] = '\0';
+    notify_time = HAL_GetTick();
+}
+
+/* ── Button poll ──────────────────────────────────────────────────────────── */
 static void Button_Poll(Button_t *b)
 {
     b->pressed = 0;
     uint32_t now = HAL_GetTick();
     uint8_t  raw = BTN_PRESSED(b->port, b->pin) ? 0u : 1u;
-    if (raw == 0u && b->last_state == 1u) {
-        if ((now - b->last_time) >= BTN_DEBOUNCE_MS) {
-            b->pressed   = 1;
-            b->last_time = now;
-        }
-    }
+    if (raw == 0u && b->last_state == 1u)
+        if ((now - b->last_time) >= BTN_DEBOUNCE_MS)
+            { b->pressed = 1; b->last_time = now; }
     b->last_state = raw;
 }
 
@@ -353,123 +476,109 @@ static void Encoder_Process(void)
 {
     int32_t diff = EC11_TimerDiff16(&encoder, ENC_READ());
     if (diff == 0) return;
-
     int32_t before = encoder.step;
     EC11_ProcessTicks(&encoder, diff);
     int32_t delta = encoder.step - before;
     if (delta == 0) return;
-
     int32_t step = (delta > 0) ? 1 : -1;
 
     switch (g_adj) {
     case ADJ_FREQ:
-        if (step > 0) Freq_Increase();
-        else          Freq_Decrease();
-        Strobe_ApplyFreq();   /* ARR changes — full restart */
+        if (step > 0) Freq_Increase(); else Freq_Decrease();
+        Strobe_ApplyFreq();
         break;
-
     case ADJ_DUTY:
-        if (step > 0) Duty_Increase();
-        else          Duty_Decrease();
-        Strobe_ApplyDuty();   /* CCR only — no counter reset */
+        if (step > 0) Duty_Increase(); else Duty_Decrease();
+        Strobe_ApplyDuty();
         break;
-
     case ADJ_BRIGHT:
-        if (step > 0 && g_bright < STROBE_BRIGHT_MAX) g_bright++;
-        else if (step < 0 && g_bright > STROBE_BRIGHT_MIN) g_bright--;
-        /* g_bright is read live in TIM3 ISR — nothing to apply */
+        if (step > 0) Brig_Increase(); else Brig_Decrease();
+        /* Brig_GetCCR() is read live in TIM3 ISR */
         break;
-
     default: break;
     }
 }
 
-/* ── Update SH1106 128×64 display ────────────────────────────────────────── */
+/* ── Display ──────────────────────────────────────────────────────────────── */
 static void Display_Update(void)
 {
     SH1106_Fill(SH1106_COLOR_BLACK);
 
-    /* Inverted header */
+    /* Header */
     SH1106_FillRectangle(0, 0, 127, 11, SH1106_COLOR_WHITE);
     SH1106_WriteStringAt(14, 2, "= STROBE 006 =", Font_8H, SH1106_COLOR_BLACK);
 
-    /* Frequency / period row */
+    /* Frequency row */
     if (g_freq_mode == FREQ_MODE_HZ) {
         snprintf(disp_buf, sizeof(disp_buf), "%cFreq: %3lu Hz",
                  (g_adj == ADJ_FREQ) ? '>' : ' ', g_freq_hz);
     } else {
         uint32_t period_ms = g_period_steps * PERIOD_STEP_MS;
-        /* freq * 100 (integer, avoids floats) */
-        uint32_t fq100 = 100000u / period_ms;
-
+        uint32_t fq100     = 100000u / period_ms;
         char freq_str[10];
-        if (fq100 >= 100u) {
-            /* >= 1.00 Hz: show one decimal, e.g. "6.6Hz" */
+        if (fq100 >= 100u)
             snprintf(freq_str, sizeof(freq_str), "%lu.%luHz",
                      fq100 / 100u, (fq100 % 100u) / 10u);
-        } else {
-            /* < 1.00 Hz: show two decimals, e.g. "0.15Hz" */
+        else
             snprintf(freq_str, sizeof(freq_str), "0.%02luHz", fq100);
-        }
-
-        if (period_ms < 1000u) {
+        if (period_ms < 1000u)
             snprintf(disp_buf, sizeof(disp_buf), "%c%lums %s",
                      (g_adj == ADJ_FREQ) ? '>' : ' ', period_ms, freq_str);
-        } else {
-            uint32_t s_int  = period_ms / 1000u;
-            uint32_t s_frac = (period_ms % 1000u) / 10u;  /* two decimal places */
+        else
             snprintf(disp_buf, sizeof(disp_buf), "%c%lu.%02lus %s",
-                     (g_adj == ADJ_FREQ) ? '>' : ' ', s_int, s_frac, freq_str);
-        }
+                     (g_adj == ADJ_FREQ) ? '>' : ' ',
+                     period_ms / 1000u, (period_ms % 1000u) / 10u, freq_str);
     }
     SH1106_WriteStringAt(0, 14, disp_buf, Font_8H, SH1106_COLOR_WHITE);
 
-    /* Duty — always show both percent and 1/N */
-    uint32_t pct = Duty_GetPct();
-    uint32_t div = Duty_GetDivisor();
+    /* Duty row */
     snprintf(disp_buf, sizeof(disp_buf), "%cDuty:%2lu%% 1/%lu",
-             (g_adj == ADJ_DUTY) ? '>' : ' ', pct, div);
+             (g_adj == ADJ_DUTY) ? '>' : ' ',
+             Duty_GetPerc(), Duty_GetDivisor());
     SH1106_WriteStringAt(0, 26, disp_buf, Font_8H, SH1106_COLOR_WHITE);
 
-    /* Brightness */
-    snprintf(disp_buf, sizeof(disp_buf), "%cBrig: %3lu%%",
-             (g_adj == ADJ_BRIGHT) ? '>' : ' ', g_bright);
+    /* Brightness row */
+    snprintf(disp_buf, sizeof(disp_buf), "%cBrig:%3lu%% 1/%lu",
+             (g_adj == ADJ_BRIGHT) ? '>' : ' ',
+             Brig_GetPerc(), Brig_GetDivisor());
     SH1106_WriteStringAt(0, 38, disp_buf, Font_8H, SH1106_COLOR_WHITE);
 
     /* Status bar — inverted */
     SH1106_FillRectangle(0, 51, 127, 63, SH1106_COLOR_WHITE);
-    if (g_running)
-        SH1106_WriteStringAt(4, 53, "[ ON ]  BTN2=off", Font_8H, SH1106_COLOR_BLACK);
-    else
-        SH1106_WriteStringAt(4, 53, "[OFF]   BTN2=on ", Font_8H, SH1106_COLOR_BLACK);
+    if (notify_msg[0] &&
+        (HAL_GetTick() - notify_time) < NOTIFY_DURATION_MS)
+    {
+        /* Show save confirmation centred */
+        uint8_t len = (uint8_t)strlen(notify_msg);
+        uint8_t x   = (128u - len * 8u) / 2u;
+        SH1106_WriteStringAt(x, 53, notify_msg, Font_8H, SH1106_COLOR_BLACK);
+    } else {
+        notify_msg[0] = '\0';
+        /* Normal hint: BTN2 toggles strobe, encoder push saves */
+        SH1106_WriteStringAt(4, 53,
+            g_running ? "[ ON ]  BTN2=off" : "[OFF]   BTN2=on ",
+            Font_8H, SH1106_COLOR_BLACK);
+    }
 
     SH1106_UpdateScreen();
 }
 
-/* USER CODE END 0 */
-
-/* ════════════════════════════════════════════════════════════════════════════
- * TIM3_IRQHandler — strobe timer
- *
+/* ── TIM3_IRQHandler — strobe timer ──────────────────────────────────────────
  * IMPORTANT: comment out HAL_TIM_IRQHandler(&htim3) in stm32f4xx_it.c !
- * ════════════════════════════════════════════════════════════════════════════ */
+ * ─────────────────────────────────────────────────────────────────────────── */
 void TIM3_IRQHandler(void)
 {
-    /* Update: start of period → LED ON */
     if (__HAL_TIM_GET_FLAG(&htim3, TIM_FLAG_UPDATE) &&
         __HAL_TIM_GET_IT_SOURCE(&htim3, TIM_IT_UPDATE))
     {
         __HAL_TIM_CLEAR_FLAG(&htim3, TIM_FLAG_UPDATE);
-        /* g_bright is read live — brightness change needs no extra apply step */
-        __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, Bright_CCR(g_bright));
+        __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, Brig_GetCCR());
         HAL_GPIO_WritePin(GPIOB, GPIO_PIN_0, GPIO_PIN_SET);
         HAL_GPIO_WritePin(GPIOC, GPIO_PIN_13, GPIO_PIN_RESET);
-        /* Arm CC1 interrupt for the LED-off moment */
         __HAL_TIM_CLEAR_FLAG(&htim3, TIM_FLAG_CC1);
         __HAL_TIM_ENABLE_IT(&htim3, TIM_IT_CC1);
     }
 
-    /* CC1: duty point reached → LED OFF */
     if (__HAL_TIM_GET_FLAG(&htim3, TIM_FLAG_CC1) &&
         __HAL_TIM_GET_IT_SOURCE(&htim3, TIM_IT_CC1))
     {
@@ -481,9 +590,9 @@ void TIM3_IRQHandler(void)
     }
 }
 
-/* ════════════════════════════════════════════════════════════════════════════
- * main
- * ════════════════════════════════════════════════════════════════════════════ */
+/* USER CODE END 0 */
+
+/* ── main ───────────────────────────────────────────────────────────────────*/
 int main(void)
 {
     /* USER CODE BEGIN 1 */
@@ -503,11 +612,13 @@ int main(void)
 
     /* USER CODE BEGIN 2 */
 
-    /* Display init */
+    /* Restore settings from Flash if valid */
+    Flash_LoadConfig();
+
+    /* Display */
     HAL_Delay(50);
-    if (SH1106_Init() != SH1106_OK) {
+    if (SH1106_Init() != SH1106_OK)
         while (1) { LED_TOGGLE(); HAL_Delay(200); }
-    }
     SH1106_Fill(SH1106_COLOR_BLACK);
     SH1106_WriteStringAt(20, 26, "STROBE 006", Font_8H, SH1106_COLOR_WHITE);
     SH1106_UpdateScreen();
@@ -518,7 +629,7 @@ int main(void)
     HAL_TIM_Encoder_Start(&htim2, TIM_CHANNEL_ALL);
     ENC_RESET();
 
-    /* TIM1 PWM: start with CCR1=0 (LED off until first strobe pulse) */
+    /* TIM1 PWM */
     HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_1);
     __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, 0u);
 
@@ -526,13 +637,11 @@ int main(void)
     HAL_NVIC_SetPriority(TIM3_IRQn, 2, 0);
     HAL_NVIC_EnableIRQ(TIM3_IRQn);
 
-    /* Apply initial settings and show display */
     Strobe_ApplyFreq();
     Display_Update();
 
     /* USER CODE END 2 */
 
-    /* ── Main loop ──────────────────────────────────────────────────────── */
     while (1)
     {
         /* USER CODE BEGIN WHILE */
@@ -541,28 +650,31 @@ int main(void)
         Button_Poll(&btn2);
         Button_Poll(&btn3);
 
-        /* BTN1 — cycle editable parameter */
-        if (btn1.pressed)
+        /* BTN1 = encoder push (PA2): cycle parameter, then save to Flash */
+        if (btn1.pressed) {
             g_adj = (AdjMode_t)((g_adj + 1u) % ADJ_COUNT);
+            Flash_SaveConfig();
+            Notify("  SAVED  ");
+        }
 
         /* BTN2 — toggle strobe on / off */
         if (btn2.pressed)
             Strobe_SetRunning(g_running ? 0u : 1u);
 
-        /* BTN3 — reset all parameters to defaults */
+        /* BTN3 — reset all to defaults */
         if (btn3.pressed) {
             g_freq_mode    = FREQ_MODE_HZ;
             g_freq_hz      = FREQ_HZ_INIT;
             g_period_steps = PERIOD_STEPS_INIT;
-            g_duty_mode    = DUTY_MODE_PCT;
-            g_duty_val     = DUTY_PCT_INIT;
-            g_bright       = STROBE_BRIGHT_INIT;
+            g_duty_mode    = DUTY_MODE_PERC;
+            g_duty_val     = DUTY_PERC_INIT;
+            g_brig_mode    = BRIG_MODE_PERC;
+            g_brig_val     = BRIG_PERC_INIT;
             Strobe_ApplyFreq();
         }
 
         Encoder_Process();
 
-        /* Periodic display refresh — fixed rate */
         uint32_t now = HAL_GetTick();
         if ((now - last_display_tick) >= UPDATE_DELAY_MS) {
             last_display_tick = now;
@@ -573,9 +685,14 @@ int main(void)
     }
 }
 
-/* ════════════════════════════════════════════════════════════════════════════
- * SystemClock_Config — HSE 25 MHz → PLL → SYSCLK 100 MHz
- * ════════════════════════════════════════════════════════════════════════════ */
+/* USER CODE BEGIN 4 */
+/* USER CODE END 4 */
+
+/* ── SystemClock_Config ──────────────────────────────────────────────────────
+ * HSE 25 MHz → PLL (PLLM=12, PLLN=96, PLLP=2) → SYSCLK 100 MHz
+ * Generated by CubeMX — preserved here for completeness.
+ * If CubeMX regenerates this function, remove the copy below.
+ * ─────────────────────────────────────────────────────────────────────────── */
 void SystemClock_Config(void)
 {
     RCC_OscInitTypeDef RCC_OscInitStruct = {0};
@@ -603,9 +720,7 @@ void SystemClock_Config(void)
     if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_3) != HAL_OK) Error_Handler();
 }
 
-/* ════════════════════════════════════════════════════════════════════════════
- * Error_Handler
- * ════════════════════════════════════════════════════════════════════════════ */
+/* ── Error_Handler ─────────────────────────────────────────────────────────── */
 void Error_Handler(void)
 {
     __disable_irq();

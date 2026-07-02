@@ -150,9 +150,7 @@ typedef struct {
  * period_ticks = 10,000,000 mHz / freq_mhz */
 #define TIM3_MHZ_RATE     10000000u
 
-/* flash -- last sector of STM32F411CE (512 KB).
- * Magic B008: layout changed from B007 (freq_mhz replaces period_ticks,
- * explicit padding added). An old record is rejected by the checksum. */
+/* flash -- last sector of STM32F411CE (512 KB). */
 #define FLASH_CONFIG_SECTOR  FLASH_SECTOR_7
 #define FLASH_CONFIG_ADDR    0x08060000UL
 #define FLASH_CONFIG_MAGIC   0x5752B008UL
@@ -268,12 +266,8 @@ static uint32_t Brig_GetCCR(void)
 {
     uint32_t ccr;
     if (g_brig_mode == BRIG_MODE_PERC) {
-        /* percent mode: CCR = 1000 * pct / 100 */
         ccr = ((TIM1_PWM_ARR + 1u) * g_brig_val) / 100u;
     } else {
-        /* divisor mode: CCR = 1000 / N -- computed directly to avoid losing
-         * resolution when converting 1/N to percent first.
-         * Example: N=100 -> CCR=10, N=200 -> CCR=5 (both would be 1% otherwise). */
         ccr = (TIM1_PWM_ARR + 1u) / g_brig_val;
     }
     if (ccr == 0u) ccr = 1u;
@@ -344,21 +338,12 @@ static void Duty_Decrease(void)
 }
 
 /* frequency helpers */
-
-/* converts g_freq_mhz to TIM3 ARR.
- * TIM3 tick rate is 10 kHz = 10,000,000 mHz.
- * period_ticks = 10,000,000 / freq_mhz (rounded). ARR = period_ticks - 1. */
 static uint32_t Strobe_GetARR(void)
 {
     uint32_t ticks = (TIM3_MHZ_RATE + g_freq_mhz / 2u) / g_freq_mhz;
     return ticks - 1u;
 }
 
-/* formats g_freq_mhz as a human-readable Hz string.
- * >= 100 Hz : integer,      e.g. "100Hz", "1000Hz"
- * >= 10 Hz  : one decimal,  e.g. "30.0Hz", "99.9Hz"
- * >= 1 Hz   : two decimals, e.g. "1.50Hz", "9.99Hz"
- * <  1 Hz   : "0.XXHz",    e.g. "0.15Hz", "0.50Hz" */
 static void Format_Freq(char *buf, size_t bufsz)
 {
     uint32_t hz_int  = g_freq_mhz / 1000u;
@@ -394,9 +379,6 @@ static void Strobe_ApplyFreq(void)
     HAL_TIM_Base_Stop_IT(&htim3);
     __HAL_TIM_DISABLE_IT(&htim3, TIM_IT_CC1);
 
-    /* force outputs off before reconfiguring -- if a change happens mid "on"
-     * phase the LED/MOSFET would stay lit until the next update event,
-     * visible as a stray flash right after turning the knob. */
     __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, 0u);
     HAL_GPIO_WritePin(GPIOB, GPIO_PIN_0, GPIO_PIN_RESET);
     HAL_GPIO_WritePin(GPIOC, GPIO_PIN_13, GPIO_PIN_SET);
@@ -441,8 +423,6 @@ static void Apply_Defaults(void)
 }
 
 /* flash config */
-
-/* simple XOR checksum over all fields except checksum itself */
 static uint32_t Config_Checksum(const FlashConfig_t *c)
 {
     const uint8_t *p   = (const uint8_t *)c;
@@ -455,7 +435,7 @@ static uint32_t Config_Checksum(const FlashConfig_t *c)
 static void Flash_SaveConfig(void)
 {
     FlashConfig_t cfg;
-    memset(&cfg, 0, sizeof(cfg));   /* zero padding so checksum is deterministic */
+    memset(&cfg, 0, sizeof(cfg));
     cfg.magic     = FLASH_CONFIG_MAGIC;
     cfg.freq_mhz  = g_freq_mhz;
     cfg.step_idx  = g_step_idx;
@@ -502,7 +482,6 @@ static void Flash_LoadConfig(void)
     g_brig_val  = cfg->brig_val;
     g_running   = cfg->running;
 
-    /* clamp to safe ranges in case flash is stale */
     if (g_freq_mhz < FREQ_MHZ_MIN)  g_freq_mhz = FREQ_MHZ_INIT;
     if (g_freq_mhz > FREQ_MHZ_MAX)  g_freq_mhz = FREQ_MHZ_MAX;
     if (g_step_idx > 2u)             g_step_idx = 0u;
@@ -518,9 +497,7 @@ static void Notify(const char *msg)
     notify_time = HAL_GetTick();
 }
 
-/* button poll.
- * pressed: fires once on release if hold threshold was never crossed.
- * held:    fires once while still held, as soon as threshold is crossed. */
+/* button poll */
 static void Button_Poll(Button_t *b)
 {
     b->pressed = 0;
@@ -562,15 +539,11 @@ static void Encoder_Process(void)
     int32_t delta = encoder.step - before;
     if (delta == 0) return;
 
-    /* apply every accumulated detent -- fast rotation can move the step
-     * counter by more than one detent between polls. */
     int32_t count = (delta > 0) ? delta : -delta;
     int32_t dir   = (delta > 0) ? 1 : -1;
 
     switch (g_adj) {
     case ADJ_FREQ: {
-        /* frequency step is linear in Hz: x1=0.1Hz, x10=1Hz, x100=10Hz.
-         * Encoder "up" raises frequency -> add to mhz. */
         uint32_t step_mhz = g_step_mults[g_step_idx] * FREQ_STEP_BASE_MHZ;
         int32_t  change   = dir * count * (int32_t)step_mhz;
         int32_t  new_mhz  = (int32_t)g_freq_mhz + change;
@@ -593,7 +566,6 @@ static void Encoder_Process(void)
         for (int32_t i = 0; i < count; i++)
             for (uint32_t m = 0u; m < mult; m++)
                 if (dir > 0) Brig_Increase(); else Brig_Decrease();
-        /* Brig_GetCCR() is read live in the TIM3 ISR */
         break;
     }
     default: break;
@@ -698,13 +670,48 @@ int main(void)
 
     Flash_LoadConfig();
 
-    HAL_Delay(50);
+    HAL_Delay(200);
     if (SH1106_Init() != SH1106_OK)
         while (1) { LED_TOGGLE(); HAL_Delay(200); }
-    SH1106_Fill(SH1106_COLOR_BLACK);
-    SH1106_WriteStringAt(20, ROW_FREQ_Y, "STROBE 006", Font_8H, SH1106_COLOR_WHITE);
-    SH1106_UpdateScreen();
-    HAL_Delay(800);
+
+    /* animated splash -- progress bar grows left to right.
+     * 20 frames x 20 ms = 400 ms total.
+     * right margin of 12 px makes a fully filled bar visually distinct
+     * from one that has gone past the edge. */
+    {
+        const uint8_t  bar_x0    =  4u;
+        const uint8_t  bar_x1    = 116u;   /* 12 px right margin */
+        const uint8_t  bar_y0    = ROW_DUTY_Y + 1u;
+        const uint8_t  bar_y1    = ROW_DUTY_Y + 7u;
+        const uint8_t  bar_width = bar_x1 - bar_x0;
+        const uint8_t  frames    = 20u;
+        uint8_t        f;
+
+        for (f = 0u; f <= frames; f++) {
+            SH1106_Fill(SH1106_COLOR_BLACK);
+            SH1106_WriteStringAt(16, ROW_FREQ_Y, "STROBE  006",
+                                 Font_8H, SH1106_COLOR_WHITE);
+
+            /* outline */
+            SH1106_FillRectangle(bar_x0 - 1u, bar_y0 - 1u,
+                                 bar_x1 + 1u, bar_y1 + 1u,
+                                 SH1106_COLOR_WHITE);
+            SH1106_FillRectangle(bar_x0, bar_y0,
+                                 bar_x1, bar_y1,
+                                 SH1106_COLOR_BLACK);
+
+            /* filled portion */
+            uint8_t fill = (uint8_t)((uint16_t)bar_width * f / frames);
+            if (fill > 0u) {
+                SH1106_FillRectangle(bar_x0, bar_y0,
+                                     bar_x0 + fill, bar_y1,
+                                     SH1106_COLOR_WHITE);
+            }
+
+            SH1106_UpdateScreen();
+            HAL_Delay(20);
+        }
+    }
 
     EC11_Init(&encoder);
     HAL_TIM_Encoder_Start(&htim2, TIM_CHANNEL_ALL);

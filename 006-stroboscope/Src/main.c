@@ -1,3 +1,5 @@
+/* Core/Src/main.c */
+
 /* USER CODE BEGIN Header */
 /**
   ******************************************************************************
@@ -10,33 +12,36 @@
   * I2C1           -- SH1106 display (PB6/PB7)
   *
   * Display note: pixel rows 1-8 (1-indexed from top) are partially broken.
-  * Nothing is drawn above y=11 (0-indexed). Four pixels of usable space at
-  * the bottom (y=60..63) are used by the status bar.
+  * Nothing is drawn above y=11 (0-indexed).
   *
-  * Frequency is stored as millihertz (g_freq_mhz). The encoder step
-  * multiplier controls the Hz-linear step per detent:
+  * SH1106_FillRectangle signature: (x, y, width, height, color).
+  *
+  * Screens (cycled by bottom button):
+  *   SCREEN_MAIN   -- big 7-segment frequency display, encoder adjusts freq
+  *   SCREEN_DUTY   -- duty cycle settings, encoder adjusts duty
+  *   SCREEN_BRIGHT -- brightness settings, encoder adjusts brightness
+  *
+  * Frequency stored as millihertz (g_freq_mhz). Step multiplier sets
+  * the Hz-linear step per encoder detent:
   *   x1   ->  0.1 Hz / click
   *   x10  ->  1   Hz / click
   *   x100 -> 10   Hz / click
-  *
-  *   Range: 153 mHz (approx 0.15 Hz) to 1000 Hz.
+  *   Range: ~0.15 Hz to 1000 Hz.
   *
   * Duty cycle -- two modes:
   *   PERC mode : 5-50%, step 1%
   *   DIV mode  : 1/N, N=25-200, step 5
-  *   Display always shows both: "X% 1/N"
   *
   * Brightness -- two modes:
   *   PERC mode : 10-100%, step 1%
   *   DIV mode  : 1/N, N=10-200, step 1
-  *   Display always shows both: "X% 1/N"
   *
   * Controls:
-  *   Encoder push  -- short: cycle step multiplier (x1 / x10 / x100)
-  *                    hold:  save to flash
-  *   Top button    -- short: cycle active parameter (Freq->Duty->Bright)
-  *   Bottom button -- short: strobe on / off
-  *                    hold:  reset all to defaults
+  *   Encoder push   -- short: cycle step multiplier (x1/x10/x100)
+  *                     hold:  save to flash
+  *   Bottom button  -- short: cycle screens (main->duty->bright->main)
+  *   Top button     -- short: strobe on/off
+  *                     hold:  reset all to defaults
   *
   * Flash storage (sector 7, 0x08060000, 128 KB).
   *
@@ -62,13 +67,14 @@
 #include "sh1106.h"
 #include "sh1106_fonts.h"
 #include "EC11.h"
+#include "big_freq.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
-typedef enum { ADJ_FREQ = 0, ADJ_DUTY, ADJ_BRIGHT, ADJ_COUNT } AdjMode_t;
-typedef enum { DUTY_MODE_PERC = 0, DUTY_MODE_DIV }             DutyMode_t;
-typedef enum { BRIG_MODE_PERC = 0, BRIG_MODE_DIV }             BrigMode_t;
+typedef enum { SCREEN_MAIN = 0, SCREEN_DUTY, SCREEN_BRIGHT, SCREEN_COUNT } Screen_t;
+typedef enum { DUTY_MODE_PERC = 0, DUTY_MODE_DIV }                         DutyMode_t;
+typedef enum { BRIG_MODE_PERC = 0, BRIG_MODE_DIV }                         BrigMode_t;
 
 typedef struct {
     GPIO_TypeDef *port;
@@ -83,18 +89,18 @@ typedef struct {
 
 /* settings saved to flash */
 typedef struct {
-    uint32_t  magic;          /* identifies a valid, current-layout record */
-    uint32_t  freq_mhz;       /* frequency in millihertz                   */
-    uint8_t   step_idx;       /* index into g_step_mults[]                 */
-    uint8_t   duty_mode;      /* DutyMode_t                                */
+    uint32_t  magic;
+    uint32_t  freq_mhz;
+    uint8_t   step_idx;
+    uint8_t   duty_mode;
     uint8_t   _pad0[2];
     uint32_t  duty_val;
-    uint8_t   brig_mode;      /* BrigMode_t                                */
+    uint8_t   brig_mode;
     uint8_t   _pad1[3];
     uint32_t  brig_val;
     uint8_t   running;
     uint8_t   _pad2[3];
-    uint32_t  checksum;       /* simple XOR of all preceding bytes         */
+    uint32_t  checksum;
 } FlashConfig_t;
 /* USER CODE END PTD */
 
@@ -102,10 +108,9 @@ typedef struct {
 /* USER CODE BEGIN PD */
 #define UPDATE_DELAY_MS      100u
 
-/* buttons.
- * BTN1 = encoder push (PA2): short=cycle step, hold=save.
- * BTN2 = top    (PA3): short=cycle parameter.
- * BTN3 = bottom (PA4): short=on/off, hold=reset. */
+/* BTN1 = encoder push  (PA2): short=cycle step, hold=save
+ * BTN2 = bottom button (PA3): short=cycle screens
+ * BTN3 = top button    (PA4): short=strobe on/off, hold=reset */
 #define BTN1_PORT  GPIOA
 #define BTN1_PIN   GPIO_PIN_2
 #define BTN2_PORT  GPIOA
@@ -114,14 +119,12 @@ typedef struct {
 #define BTN3_PIN   GPIO_PIN_4
 
 /* frequency in millihertz.
- * At FREQ_MHZ_MIN=153: period_ticks = 10000000/153 = 65359, ARR=65358 (16-bit ok).
- * At FREQ_MHZ_MAX=1000000: period_ticks = 10, ARR = 9. */
+ * at FREQ_MHZ_MIN=153: ARR = 10000000/153 - 1 = 65358 (fits 16-bit).
+ * at FREQ_MHZ_MAX=1000000: ARR = 9. */
 #define FREQ_MHZ_MIN         153u
 #define FREQ_MHZ_MAX     1000000u
 #define FREQ_MHZ_INIT      30000u   /* 30.0 Hz */
-
-/* encoder step multiplier base for frequency: x1 = 100 mHz = 0.1 Hz/click */
-#define FREQ_STEP_BASE_MHZ   100u
+#define FREQ_STEP_BASE_MHZ   100u   /* x1 = 0.1 Hz per click */
 
 /* duty -- percent mode */
 #define DUTY_PERC_MIN          5u
@@ -146,11 +149,10 @@ typedef struct {
 /* TIM1: PSC=9, ARR=999 -> 10 kHz PWM */
 #define TIM1_PWM_ARR         999u
 
-/* TIM3: PSC=9999 -> tick = 0.1 ms, f_count = 10 kHz.
- * period_ticks = 10,000,000 mHz / freq_mhz */
+/* TIM3: PSC=9999 -> tick = 0.1 ms, 10,000,000 mHz per second */
 #define TIM3_MHZ_RATE     10000000u
 
-/* flash -- last sector of STM32F411CE (512 KB). */
+/* flash -- last sector of STM32F411CE (512 KB) */
 #define FLASH_CONFIG_SECTOR  FLASH_SECTOR_7
 #define FLASH_CONFIG_ADDR    0x08060000UL
 #define FLASH_CONFIG_MAGIC   0x5752B008UL
@@ -158,16 +160,13 @@ typedef struct {
 /* notification duration */
 #define NOTIFY_DURATION_MS   600u
 
-/* display layout -- y=0..7 (rows 1-8, 1-indexed) are partially broken.
- * All content starts at y=11 or below. Four spare pixels at the bottom
- * (y=60..63) are used by the status bar so rows fit with comfortable gaps. */
-#define ROW_STEP_Y            11
-#define ROW_FREQ_Y            21
-#define ROW_DUTY_Y            31
-#define ROW_BRIGHT_Y          41
-#define STATUSBAR_Y0          53
-#define STATUSBAR_Y1          63
-#define STATUSBAR_TEXT_Y      55
+/* display layout -- nothing drawn above y=11 (rows 1-8 are broken).
+ * status bar: y=53..63, height=11. */
+#define ROW_TOP_Y            11
+#define ROW_BIG_Y            18
+#define STATUSBAR_Y          53
+#define STATUSBAR_H          11
+#define STATUSBAR_TEXT_Y     55
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -187,34 +186,24 @@ extern I2C_HandleTypeDef hi2c1;
 
 EC11_Encoder_t encoder;
 
-/* encoder step multiplier -- x1 / x10 / x100 */
 static const uint32_t g_step_mults[3] = { 1u, 10u, 100u };
 static uint8_t        g_step_idx      = 0u;
 
-/* frequency state */
 static uint32_t   g_freq_mhz  = FREQ_MHZ_INIT;
-
-/* duty state */
 static DutyMode_t g_duty_mode = DUTY_MODE_PERC;
 static uint32_t   g_duty_val  = DUTY_PERC_INIT;
-
-/* brightness state */
 static BrigMode_t g_brig_mode = BRIG_MODE_PERC;
 static uint32_t   g_brig_val  = BRIG_PERC_INIT;
+static uint8_t    g_running   = 1u;
+static Screen_t   g_screen    = SCREEN_MAIN;
 
-static uint8_t    g_running = 1;
-static AdjMode_t  g_adj     = ADJ_FREQ;
-
-/* buttons */
 static Button_t btn1 = { BTN1_PORT, BTN1_PIN, 1, 0, 0, 0, 0, 0 };
 static Button_t btn2 = { BTN2_PORT, BTN2_PIN, 1, 0, 0, 0, 0, 0 };
 static Button_t btn3 = { BTN3_PORT, BTN3_PIN, 1, 0, 0, 0, 0, 0 };
 
-/* notification -- init to far past so it never fires at startup */
-static char     notify_msg[17]   = "";
-static uint32_t notify_time      = (uint32_t)(-NOTIFY_DURATION_MS - 1u);
-
-static uint32_t last_display_tick = 0;
+static char     notify_msg[17]    = "";
+static uint32_t notify_time       = (uint32_t)(-NOTIFY_DURATION_MS - 1u);
+static uint32_t last_display_tick = 0u;
 static char     disp_buf[32];
 /* USER CODE END PV */
 
@@ -236,7 +225,6 @@ static uint32_t  Brig_GetPerc(void);
 static uint32_t  Brig_GetDivisor(void);
 static void      Brig_Increase(void);
 static void      Brig_Decrease(void);
-static void      Format_Freq(char *buf, size_t bufsz);
 static void      Apply_Defaults(void);
 static void      Button_Poll(Button_t *b);
 static void      Encoder_Process(void);
@@ -265,11 +253,10 @@ static uint32_t Brig_GetDivisor(void)
 static uint32_t Brig_GetCCR(void)
 {
     uint32_t ccr;
-    if (g_brig_mode == BRIG_MODE_PERC) {
+    if (g_brig_mode == BRIG_MODE_PERC)
         ccr = ((TIM1_PWM_ARR + 1u) * g_brig_val) / 100u;
-    } else {
+    else
         ccr = (TIM1_PWM_ARR + 1u) / g_brig_val;
-    }
     if (ccr == 0u) ccr = 1u;
     return ccr;
 }
@@ -344,32 +331,6 @@ static uint32_t Strobe_GetARR(void)
     return ticks - 1u;
 }
 
-static void Format_Freq(char *buf, size_t bufsz)
-{
-    uint32_t hz_int  = g_freq_mhz / 1000u;
-    uint32_t hz_frac = g_freq_mhz % 1000u;
-    uint32_t d1, d2;
-
-    if (hz_int >= 100u) {
-        snprintf(buf, bufsz, "%luHz", (g_freq_mhz + 500u) / 1000u);
-    } else if (hz_int >= 10u) {
-        d1 = (hz_frac + 50u) / 100u;
-        if (d1 >= 10u) { hz_int++; d1 = 0u; }
-        snprintf(buf, bufsz, "%lu.%luHz", hz_int, d1);
-    } else if (hz_int >= 1u) {
-        d2 = (hz_frac + 5u) / 10u;
-        if (d2 >= 100u) { hz_int++; d2 = 0u; }
-        snprintf(buf, bufsz, "%lu.%02luHz", hz_int, d2);
-    } else {
-        d2 = (hz_frac + 5u) / 10u;
-        if (d2 >= 100u) {
-            snprintf(buf, bufsz, "1.00Hz");
-        } else {
-            snprintf(buf, bufsz, "0.%02luHz", d2);
-        }
-    }
-}
-
 /* strobe apply */
 static void Strobe_ApplyFreq(void)
 {
@@ -385,7 +346,7 @@ static void Strobe_ApplyFreq(void)
 
     __HAL_TIM_SET_AUTORELOAD(&htim3, arr);
     __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, ccr);
-    __HAL_TIM_SET_COUNTER(&htim3, 0u);
+    __HAL_TIM_SET_COUNTER(&htim3, arr);
     __HAL_TIM_CLEAR_FLAG(&htim3, TIM_FLAG_UPDATE | TIM_FLAG_CC1);
     if (g_running) HAL_TIM_Base_Start_IT(&htim3);
 }
@@ -497,11 +458,13 @@ static void Notify(const char *msg)
     notify_time = HAL_GetTick();
 }
 
-/* button poll */
+/* button poll.
+ * pressed: fires once on release, only if hold was never triggered.
+ * held:    fires once while still held, as soon as hold threshold crossed. */
 static void Button_Poll(Button_t *b)
 {
-    b->pressed = 0;
-    b->held    = 0;
+    b->pressed = 0u;
+    b->held    = 0u;
     uint32_t now = HAL_GetTick();
     uint8_t  raw = BTN_PRESSED(b->port, b->pin) ? 0u : 1u;
 
@@ -542,18 +505,17 @@ static void Encoder_Process(void)
     int32_t count = (delta > 0) ? delta : -delta;
     int32_t dir   = (delta > 0) ? 1 : -1;
 
-    switch (g_adj) {
-    case ADJ_FREQ: {
+    switch (g_screen) {
+    case SCREEN_MAIN: {
         uint32_t step_mhz = g_step_mults[g_step_idx] * FREQ_STEP_BASE_MHZ;
-        int32_t  change   = dir * count * (int32_t)step_mhz;
-        int32_t  new_mhz  = (int32_t)g_freq_mhz + change;
+        int32_t  new_mhz  = (int32_t)g_freq_mhz + dir * count * (int32_t)step_mhz;
         if (new_mhz < (int32_t)FREQ_MHZ_MIN) new_mhz = (int32_t)FREQ_MHZ_MIN;
         if (new_mhz > (int32_t)FREQ_MHZ_MAX) new_mhz = (int32_t)FREQ_MHZ_MAX;
         g_freq_mhz = (uint32_t)new_mhz;
         Strobe_ApplyFreq();
         break;
     }
-    case ADJ_DUTY: {
+    case SCREEN_DUTY: {
         uint32_t mult = g_step_mults[g_step_idx];
         for (int32_t i = 0; i < count; i++)
             for (uint32_t m = 0u; m < mult; m++)
@@ -561,11 +523,12 @@ static void Encoder_Process(void)
         Strobe_ApplyDuty();
         break;
     }
-    case ADJ_BRIGHT: {
+    case SCREEN_BRIGHT: {
         uint32_t mult = g_step_mults[g_step_idx];
         for (int32_t i = 0; i < count; i++)
             for (uint32_t m = 0u; m < mult; m++)
                 if (dir > 0) Brig_Increase(); else Brig_Decrease();
+        /* Brig_GetCCR() is read live in the TIM3 ISR */
         break;
     }
     default: break;
@@ -577,45 +540,72 @@ static void Display_Update(void)
 {
     SH1106_Fill(SH1106_COLOR_BLACK);
 
-    /* step row -- also used as notification banner */
-    if (notify_msg[0] && (HAL_GetTick() - notify_time) < NOTIFY_DURATION_MS) {
-        SH1106_WriteStringAt(0, ROW_STEP_Y, notify_msg, Font_8H, SH1106_COLOR_WHITE);
-    } else {
-        notify_msg[0] = '\0';
-        if (g_adj == ADJ_FREQ) {
-            static const char * const hz_labels[3] = { "0.1 Hz", "1 Hz", "10 Hz" };
-            snprintf(disp_buf, sizeof(disp_buf), "STEP %s", hz_labels[g_step_idx]);
-        } else {
-            static const char * const step_labels[3] = { "1", "10", "100" };
-            snprintf(disp_buf, sizeof(disp_buf), "STEP %s", step_labels[g_step_idx]);
+    uint8_t notify_active = (notify_msg[0] != '\0') &&
+                            ((HAL_GetTick() - notify_time) < NOTIFY_DURATION_MS);
+    if (!notify_active) notify_msg[0] = '\0';
+
+    /* ---- SCREEN_MAIN ---- */
+    if (g_screen == SCREEN_MAIN) {
+
+        {
+            static const char * const hz_lbl[3] = { "0.1 Hz", "1 Hz", "10 Hz" };
+            snprintf(disp_buf, sizeof(disp_buf), "STEP %s", hz_lbl[g_step_idx]);
+            SH1106_WriteStringAt(0, ROW_TOP_Y, disp_buf, Font_8H, SH1106_COLOR_WHITE);
         }
-        SH1106_WriteStringAt(0, ROW_STEP_Y, disp_buf, Font_8H, SH1106_COLOR_WHITE);
+
+        {
+            uint8_t fw = Big_FreqWidth(g_freq_mhz);
+            uint8_t fx = (fw < 128u) ? (uint8_t)((128u - fw) / 2u) : 0u;
+            Draw_BigFreq(g_freq_mhz, fx, (uint8_t)ROW_BIG_Y);
+        }
+
+    /* ---- SCREEN_DUTY ---- */
+    } else if (g_screen == SCREEN_DUTY) {
+
+        SH1106_WriteStringAt(24, ROW_TOP_Y, "DUTY CYCLE", Font_8H, SH1106_COLOR_WHITE);
+
+        snprintf(disp_buf, sizeof(disp_buf), "%lu%%   1/%lu",
+                 Duty_GetPerc(), Duty_GetDivisor());
+        SH1106_WriteStringAt(8, 23, disp_buf, Font_8H, SH1106_COLOR_WHITE);
+
+        {
+            static const char * const sl[3] = { "1", "10", "100" };
+            snprintf(disp_buf, sizeof(disp_buf), "STEP %s", sl[g_step_idx]);
+            SH1106_WriteStringAt(0, 35, disp_buf, Font_8H, SH1106_COLOR_WHITE);
+        }
+
+        SH1106_WriteStringAt(20, 44, "BTN2: next", Font_8H, SH1106_COLOR_WHITE);
+
+    /* ---- SCREEN_BRIGHT ---- */
+    } else {
+
+        SH1106_WriteStringAt(24, ROW_TOP_Y, "BRIGHTNESS", Font_8H, SH1106_COLOR_WHITE);
+
+        snprintf(disp_buf, sizeof(disp_buf), "%lu%%   1/%lu",
+                 Brig_GetPerc(), Brig_GetDivisor());
+        SH1106_WriteStringAt(8, 23, disp_buf, Font_8H, SH1106_COLOR_WHITE);
+
+        {
+            static const char * const sl[3] = { "1", "10", "100" };
+            snprintf(disp_buf, sizeof(disp_buf), "STEP %s", sl[g_step_idx]);
+            SH1106_WriteStringAt(0, 35, disp_buf, Font_8H, SH1106_COLOR_WHITE);
+        }
+
+        SH1106_WriteStringAt(20, 44, "BTN2: next", Font_8H, SH1106_COLOR_WHITE);
     }
 
-    /* frequency row */
-    char freq_str[10];
-    Format_Freq(freq_str, sizeof(freq_str));
-    snprintf(disp_buf, sizeof(disp_buf), "%cFreq: %s",
-             (g_adj == ADJ_FREQ) ? '>' : ' ', freq_str);
-    SH1106_WriteStringAt(0, ROW_FREQ_Y, disp_buf, Font_8H, SH1106_COLOR_WHITE);
-
-    /* duty row */
-    snprintf(disp_buf, sizeof(disp_buf), "%cDuty:%2lu%% 1/%lu",
-             (g_adj == ADJ_DUTY) ? '>' : ' ',
-             Duty_GetPerc(), Duty_GetDivisor());
-    SH1106_WriteStringAt(0, ROW_DUTY_Y, disp_buf, Font_8H, SH1106_COLOR_WHITE);
-
-    /* brightness row */
-    snprintf(disp_buf, sizeof(disp_buf), "%cBrig:%3lu%% 1/%lu",
-             (g_adj == ADJ_BRIGHT) ? '>' : ' ',
-             Brig_GetPerc(), Brig_GetDivisor());
-    SH1106_WriteStringAt(0, ROW_BRIGHT_Y, disp_buf, Font_8H, SH1106_COLOR_WHITE);
-
-    /* status bar -- inverted */
-    SH1106_FillRectangle(0, STATUSBAR_Y0, 127, STATUSBAR_Y1, SH1106_COLOR_WHITE);
-    SH1106_WriteStringAt(4, STATUSBAR_TEXT_Y,
-        g_running ? "[ ON ] hold=save" : "[OFF]  hold=save",
-        Font_8H, SH1106_COLOR_BLACK);
+    /* status bar -- (x, y, width, height, color) */
+    SH1106_FillRectangle(0, STATUSBAR_Y, 128, STATUSBAR_H, SH1106_COLOR_WHITE);
+    if (notify_active) {
+        uint8_t nlen = (uint8_t)strlen(notify_msg);
+        uint8_t nx   = (nlen * 8u < 128u) ? (uint8_t)((128u - nlen * 8u) / 2u) : 0u;
+        SH1106_WriteStringAt(nx, STATUSBAR_TEXT_Y, notify_msg,
+                             Font_8H, SH1106_COLOR_BLACK);
+    } else {
+        SH1106_WriteStringAt(4, STATUSBAR_TEXT_Y,
+            g_running ? "[ ON ] BTN3=off " : "[OFF]  BTN3=on  ",
+            Font_8H, SH1106_COLOR_BLACK);
+    }
 
     SH1106_UpdateScreen();
 }
@@ -674,39 +664,36 @@ int main(void)
     if (SH1106_Init() != SH1106_OK)
         while (1) { LED_TOGGLE(); HAL_Delay(200); }
 
-    /* animated splash -- progress bar grows left to right.
-     * 20 frames x 20 ms = 400 ms total.
-     * right margin of 12 px makes a fully filled bar visually distinct
-     * from one that has gone past the edge. */
+    /* animated splash -- progress bar, 20 frames x 20 ms = 400 ms.
+     * bar: x=4, y=33, w=113, h=7. outline adds 1px border all around.
+     * 12 px right margin (bar ends at x=116) makes full fill unambiguous.
+     * all calls use (x, y, width, height) as required by SH1106_FillRectangle. */
     {
-        const uint8_t  bar_x0    =  4u;
-        const uint8_t  bar_x1    = 116u;   /* 12 px right margin */
-        const uint8_t  bar_y0    = ROW_DUTY_Y + 1u;
-        const uint8_t  bar_y1    = ROW_DUTY_Y + 7u;
-        const uint8_t  bar_width = bar_x1 - bar_x0;
-        const uint8_t  frames    = 20u;
-        uint8_t        f;
+        const uint8_t bar_x  =   4u;
+        const uint8_t bar_y  =  33u;
+        const uint8_t bar_w  = 113u;
+        const uint8_t bar_h  =   7u;
+        const uint8_t frames =  20u;
+        uint8_t       f;
 
         for (f = 0u; f <= frames; f++) {
             SH1106_Fill(SH1106_COLOR_BLACK);
-            SH1106_WriteStringAt(16, ROW_FREQ_Y, "STROBE  006",
+            SH1106_WriteStringAt(16, ROW_BIG_Y, "STROBE  006",
                                  Font_8H, SH1106_COLOR_WHITE);
 
-            /* outline */
-            SH1106_FillRectangle(bar_x0 - 1u, bar_y0 - 1u,
-                                 bar_x1 + 1u, bar_y1 + 1u,
+            /* outline: 1px border */
+            SH1106_FillRectangle(bar_x - 1u, bar_y - 1u,
+                                 bar_w + 2u,  bar_h + 2u,
                                  SH1106_COLOR_WHITE);
-            SH1106_FillRectangle(bar_x0, bar_y0,
-                                 bar_x1, bar_y1,
+            /* clear interior */
+            SH1106_FillRectangle(bar_x, bar_y, bar_w, bar_h,
                                  SH1106_COLOR_BLACK);
 
             /* filled portion */
-            uint8_t fill = (uint8_t)((uint16_t)bar_width * f / frames);
-            if (fill > 0u) {
-                SH1106_FillRectangle(bar_x0, bar_y0,
-                                     bar_x0 + fill, bar_y1,
+            uint8_t fill = (uint8_t)((uint16_t)bar_w * f / frames);
+            if (fill > 0u)
+                SH1106_FillRectangle(bar_x, bar_y, fill, bar_h,
                                      SH1106_COLOR_WHITE);
-            }
 
             SH1106_UpdateScreen();
             HAL_Delay(20);
@@ -744,11 +731,11 @@ int main(void)
             Notify("   SAVED    ");
         }
 
-        /* BTN2 -- top: cycle active parameter */
+        /* BTN2 -- bottom: cycle screens */
         if (btn2.pressed)
-            g_adj = (AdjMode_t)((g_adj + 1u) % ADJ_COUNT);
+            g_screen = (Screen_t)((g_screen + 1u) % (uint8_t)SCREEN_COUNT);
 
-        /* BTN3 -- bottom: short=strobe on/off, hold=reset */
+        /* BTN3 -- top: short=strobe on/off, hold=reset */
         if (btn3.pressed)
             Strobe_SetRunning(g_running ? 0u : 1u);
         if (btn3.held) {
